@@ -2,12 +2,10 @@ const express = require("express");
 const axios = require("axios");
 const app = express();
 app.use(express.json());
-
 const VERIFY_TOKEN = "meu_token_verificacao";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
     res.send(req.query["hub.challenge"]);
@@ -15,7 +13,6 @@ app.get("/webhook", (req, res) => {
     res.sendStatus(403);
   }
 });
-
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   if (body.object === "whatsapp_business_account") {
@@ -45,6 +42,5 @@ app.post("/webhook", async (req, res) => {
   }
   res.sendStatus(200);
 });
-
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Servidor rodando na porta " + PORT));
