@@ -9,6 +9,7 @@ app.get("/", (req, res) => {
 
 const VERIFY_TOKEN = "meu_token_verificacao";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+console.log("TOKEN PRIMEIROS 20:", WHATSAPP_TOKEN ? WHATSAPP_TOKEN.substring(0,20) : "AUSENTE");
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
