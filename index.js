@@ -30,7 +30,7 @@ app.post("/webhook", async (req, res) => {
       try {
         const claude = await axios.post(
           "https://api.anthropic.com/v1/messages",
-          { model: "claude-sonnet-4-20250514", max_tokens: 500,
+          { model: "claude-sonnet-4-5", max_tokens: 500,
             messages: [{ role: "user", content: text }] },
           { headers: { "x-api-key": CLAUDE_API_KEY,
               "anthropic-version": "2023-06-01",
