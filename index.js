@@ -28,6 +28,7 @@ app.post("/webhook", async (req, res) => {
       const from = msg.from;
       const text = msg.text.body;
       try {
+        console.log("Chamando Claude com texto:", text);
         const claude = await axios.post(
           "https://api.anthropic.com/v1/messages",
           { model: "claude-sonnet-4-20250514", max_tokens: 500,
