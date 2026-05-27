@@ -2,6 +2,9 @@ const express = require("express");
 const axios = require("axios");
 const app = express();
 app.use(express.json());
+app.get("/", (req, res) => {
+  res.send("Agente funcionando!");
+});
 const VERIFY_TOKEN = "meu_token_verificacao";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
