@@ -2,6 +2,10 @@ const express = require("express");
 const axios = require("axios");
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  console.log("Requisição recebida:", req.method, req.url);
+  next();
+});
 app.get("/", (req, res) => {
   res.send("Agente funcionando!");
 });
