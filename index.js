@@ -45,7 +45,12 @@ app.post("/webhook", async (req, res) => {
           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`,
               "Content-Type": "application/json" } }
         );
-      } catch (e) { console.error(e.message); }
+      } } catch (e) { 
+  console.error("ERRO COMPLETO:", e.message);
+  if (e.response) {
+    console.error("RESPOSTA ERRO:", JSON.stringify(e.response.data));
+  }
+}
     }
   }
   res.sendStatus(200);
