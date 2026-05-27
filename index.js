@@ -38,7 +38,7 @@ app.post("/webhook", async (req, res) => {
               "content-type": "application/json" } }
         );
         const reply = claude.data.content[0].text;
-       console.log("Enviando para:", from, "via ID:", PHONE_NUMBER_ID); await axios.post(
+       console.log("Enviando para:", from, "via ID:", PHONE_NUMBER_ID);console.log("Token:", WHATSAPP_TOKEN ? "presente" : "ausente"); await axios.post(
           `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
           { messaging_product: "whatsapp", to: from,
             text: { body: reply } },
