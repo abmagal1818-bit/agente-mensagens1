@@ -27,6 +27,7 @@ app.post("/webhook", async (req, res) => {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (msg && msg.type === "text") {
       const from = msg.from;
+      console.log("Número do remetente:", from);
       const text = msg.text.body;
       try {
         const claude = await axios.post(
