@@ -55,6 +55,22 @@ app.post("/webhook", async (req, res) => {
   }
   res.sendStatus(200);
 });
-
+app.get("/teste", async (req, res) => {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: "5551993716729",
+        type: "text",
+        text: { body: "Teste do agente Claude! 🤖" }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    res.send("Mensagem enviada!");
+  } catch (e) {
+    res.send("Erro: " + JSON.stringify(e.response?.data));
+  }
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
