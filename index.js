@@ -21,8 +21,9 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-app.post("/webhook", async (req, res) => {console.log("WEBHOOK RECEBIDO:", JSON.stringify(body));
+app.post("/webhook", async (req, res) => {
   const body = req.body;
+  console.log("WEBHOOK RECEBIDO:", JSON.stringify(body));
   if (body.object === "whatsapp_business_account") {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (msg && msg.type === "text") {
@@ -55,6 +56,7 @@ app.post("/webhook", async (req, res) => {console.log("WEBHOOK RECEBIDO:", JSON.
   }
   res.sendStatus(200);
 });
+
 app.get("/teste", async (req, res) => {
   try {
     await axios.post(
@@ -72,6 +74,7 @@ app.get("/teste", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
+
 app.get("/registrar", async (req, res) => {
   try {
     const result = await axios.post(
@@ -84,5 +87,19 @@ app.get("/registrar", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
+
+app.get("/assinar-webhook", async (req, res) => {
+  try {
+    const result = await axios.post(
+      `https://graph.facebook.com/v18.0/2609687206092266/subscribed_apps`,
+      {},
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    res.send("Assinado! " + JSON.stringify(result.data));
+  } catch (e) {
+    res.send("Erro: " + JSON.stringify(e.response?.data));
+  }
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
