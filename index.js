@@ -72,5 +72,17 @@ app.get("/teste", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
+app.get("/registrar", async (req, res) => {
+  try {
+    const result = await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/register`,
+      { messaging_product: "whatsapp", pin: "123456" },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    res.send("Registrado! " + JSON.stringify(result.data));
+  } catch (e) {
+    res.send("Erro: " + JSON.stringify(e.response?.data));
+  }
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
