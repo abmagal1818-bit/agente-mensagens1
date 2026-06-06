@@ -12,35 +12,37 @@ const MOBIAUTO_SENHA = process.env.MOBIAUTO_SENHA;
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
-let mobiautoToken = null;
+let mobigestor_token = null;
 
-async function loginMobiauto() {
-  try {
-    const response = await axios.post(
-      "https://www.mobiauto.com.br/api/v1/auth/login",
-      { email: MOBIAUTO_EMAIL, password: MOBIAUTO_SENHA },
-      { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" } }
-    );
-    mobiautoToken = response.data.token || response.data.access_token;
-    console.log("Login Mobiauto OK! Token:", mobiautoToken ? mobiautoToken.substring(0, 20) : "não encontrado");
-    return true;
-  } catch (e) {
-    console.error("Erro login Mobiauto:", e.message, e.response?.data);
-    return false;
+async function loginMobigestor() {
+  const urls = [
+    "https://api.mobigestor.com.br/api/v1/auth/login",
+    "https://api.mobigestor.com.br/auth/login",
+    "https://mobigestor.com.br/api/auth/login",
+    "https://api.mobigestor.com.br/v1/login",
+  ];
+  for (const url of urls) {
+    try {
+      const r = await axios.post(url,
+        { email: MOBIAUTO_EMAIL, password: MOBIAUTO_SENHA },
+        { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" } }
+      );
+      mobigestor_token = r.data.token || r.data.access_token;
+      console.log("Login MobiGestor OK! URL:", url);
+      return true;
+    } catch (e) {
+      console.log("Falhou:", url, e.response?.status);
+    }
   }
+  return false;
 }
 
 async function atualizarEstoque() {
   try {
-    if (!mobiautoToken) await loginMobiauto();
+    if (!mobigestor_token) await loginMobigestor();
     const response = await axios.get(
-      "https://www.mobiauto.com.br/api/v1/stores/31402/vehicles?size=100",
-      {
-        headers: {
-          Authorization: `Bearer ${mobiautoToken}`,
-          "User-Agent": "Mozilla/5.0"
-        }
-      }
+      "https://api.mobigestor.com.br/api/v1/vehicles?size=100",
+      { headers: { Authorization: `Bearer ${mobigestor_token}`, "User-Agent": "Mozilla/5.0" } }
     );
     if (response.data && response.data.content) {
       estoqueAtual = response.data.content.map(v => ({
@@ -59,7 +61,7 @@ async function atualizarEstoque() {
     }
   } catch (e) {
     console.error("Erro estoque:", e.message);
-    mobiautoToken = null;
+    mobigestor_token = null;
   }
 }
 
@@ -105,9 +107,26 @@ app.get("/estoque", (req, res) => {
   res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual });
 });
 
-app.get("/login-teste", async (req, res) => {
-  const ok = await loginMobiauto();
-  res.send(ok ? "Login OK! Token: " + mobiautoToken?.substring(0, 30) : "Login falhou — veja os logs");
+app.get("/login-mobigestor", async (req, res) => {
+  const urls = [
+    "https://api.mobigestor.com.br/api/v1/auth/login",
+    "https://api.mobigestor.com.br/auth/login",
+    "https://mobigestor.com.br/api/auth/login",
+    "https://api.mobigestor.com.br/v1/login",
+  ];
+  const resultados = {};
+  for (const url of urls) {
+    try {
+      const r = await axios.post(url,
+        { email: MOBIAUTO_EMAIL, password: MOBIAUTO_SENHA },
+        { headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" } }
+      );
+      resultados[url] = { status: r.status, dados: JSON.stringify(r.data).substring(0, 300) };
+    } catch (e) {
+      resultados[url] = { erro: e.message, status: e.response?.status };
+    }
+  }
+  res.json(resultados);
 });
 
 app.get("/webhook", (req, res) => {
