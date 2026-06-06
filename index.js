@@ -170,6 +170,23 @@ app.get("/assinar-webhook", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
-
+app.get("/estoque-teste", async (req, res) => {
+  const urls = [
+    "https://www.mobiauto.com.br/api/v1/stores/31402/vehicles?size=10",
+    "https://www.mobiauto.com.br/api/v2/stores/31402/vehicles?size=10",
+    "https://www.mobiauto.com.br/api/v1/dealer/31402/vehicles?size=10",
+    "https://www.mobiauto.com.br/api/v1/vehicles?dealerId=31402&size=10",
+  ];
+  const resultados = {};
+  for (const url of urls) {
+    try {
+      const r = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      resultados[url] = { status: r.status, dados: JSON.stringify(r.data).substring(0, 200) };
+    } catch (e) {
+      resultados[url] = { erro: e.message, status: e.response?.status };
+    }
+  }
+  res.json(resultados);
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
