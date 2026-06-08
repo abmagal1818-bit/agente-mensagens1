@@ -12,6 +12,7 @@ let estoqueAtual = [];
 let ultimaAtualizacao = null;
 const conversas = {};
 const mensagensProcessadas = new Set();
+const fipeCache = {};
 
 function formatarEstoque() {
   if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
@@ -21,6 +22,9 @@ function formatarEstoque() {
 }
 
 async function consultarFipe(marca, modelo, ano) {
+  const chave = `${marca}-${modelo}-${ano}`.toLowerCase();
+  if (fipeCache[chave]) return fipeCache[chave];
+
   try {
     const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
     const marcaEncontrada = marcasRes.data.find(m =>
@@ -39,6 +43,7 @@ async function consultarFipe(marca, modelo, ano) {
     if (!anoEncontrado) return null;
 
     const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos/${anoEncontrado.codigo}`);
+    fipeCache[chave] = valorRes.data;
     return valorRes.data;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
@@ -46,10 +51,50 @@ async function consultarFipe(marca, modelo, ano) {
   }
 }
 
+function extrairInfoVeiculo(textos) {
+  const texto = textos.join(" ").toLowerCase();
+  const marcasComuns = {
+    "toyota": "toyota", "yaris": "toyota", "corolla": "toyota", "hilux": "toyota",
+    "jeep": "jeep", "renegade": "jeep", "compass": "jeep",
+    "volkswagen": "volkswagen", "vw": "volkswagen", "jetta": "volkswagen", "polo": "volkswagen", "gol": "volkswagen",
+    "honda": "honda", "civic": "honda", "hrv": "honda", "fit": "honda",
+    "chevrolet": "chevrolet", "onix": "chevrolet", "cruze": "chevrolet", "tracker": "chevrolet",
+    "ford": "ford", "ka": "ford", "ecosport": "ford", "ranger": "ford",
+    "hyundai": "hyundai", "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai",
+    "fiat": "fiat", "argo": "fiat", "pulse": "fiat", "toro": "fiat", "strada": "fiat",
+    "renault": "renault", "kwid": "renault", "sandero": "renault", "duster": "renault",
+    "nissan": "nissan", "kicks": "nissan", "versa": "nissan",
+    "bmw": "bmw", "mercedes": "mercedes", "audi": "audi",
+    "mitsubishi": "mitsubishi", "eclipse": "mitsubishi", "pajero": "mitsubishi",
+    "kia": "kia", "sportage": "kia", "cerato": "kia"
+  };
+
+  let marcaDetectada = null;
+  let modeloDetectado = null;
+
+  for (const [palavra, marca] of Object.entries(marcasComuns)) {
+    if (texto.includes(palavra)) {
+      marcaDetectada = marca;
+      modeloDetectado = palavra;
+      break;
+    }
+  }
+
+  const anoMatch = texto.match(/\b(19|20)\d{2}\b/);
+  const ano = anoMatch ? anoMatch[0] : null;
+
+  return { marca: marcaDetectada, modelo: modeloDetectado, ano };
+}
+
 function calcularValorTroca(valorFipeStr) {
   const valor = parseFloat(valorFipeStr.replace("R$ ", "").replace(/\./g, "").replace(",", "."));
   const troca = Math.round(valor * 0.8);
-  return { fipe: valor, troca, trocaFormatado: troca.toLocaleString("pt-BR"), fipeFormatado: valor.toLocaleString("pt-BR") };
+  return {
+    fipe: valor,
+    troca,
+    trocaFormatado: troca.toLocaleString("pt-BR"),
+    fipeFormatado: valor.toLocaleString("pt-BR")
+  };
 }
 
 const SYSTEM_PROMPT = (fipeInfo) => `Você é Sara, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -61,7 +106,6 @@ EMPRESA:
 
 PERFIL:
 - Simpática, descontraída e profissional
-- Especialista em veículos usados e tabela FIPE
 - Respostas CURTAS e DIRETAS — máximo 4 linhas
 - NUNCA repita a saudação depois da primeira mensagem
 - SEMPRE mantenha o contexto da conversa anterior
@@ -73,33 +117,33 @@ PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Ca
 
 AVALIAÇÃO DE TROCA:
 ${fipeInfo ?
-  `FIPE OFICIAL CONSULTADA AGORA: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor} (${fipeInfo.MesReferencia}).
-  Valor de troca = 20% abaixo da FIPE = R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}.
-  USE EXATAMENTE ESSES VALORES. Não use outros valores.` :
-  `Quando cliente mencionar marca+ano do veículo para troca, informe que está consultando a FIPE.
-  IMPORTANTE: Nunca invente valores de FIPE. Sempre diga que vai consultar.`}
-Desconto de 20% é padrão de mercado RS. Avaliação final é presencial.
+    `✅ FIPE OFICIAL CONSULTADA AGORA (${fipeInfo.MesReferencia}):
+Modelo: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo}
+FIPE: ${fipeInfo.Valor}
+Valor de troca (20% abaixo): R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}
+⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO usar outros valores de FIPE.` :
+    `⚠️ NUNCA invente valores de FIPE. Se não tiver FIPE consultada, diga apenas:
+"Preciso de mais detalhes do seu veículo para consultar a FIPE: qual a marca, modelo e ano?"`
+  }
+Desconto de 20% é padrão de mercado RS. Avaliação final é sempre presencial.
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
 Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
 
 REGRAS:
-- Primeira mensagem: cumprimente com "Oi! 😊 Aqui é a Sara da Premium Automarcas!"
-- Demais mensagens: vá direto ao assunto, sem repetir saudação
-- Máximo 4 linhas por resposta
+- Primeira mensagem: "Oi! 😊 Aqui é a Sara da Premium Automarcas!"
+- Demais mensagens: direto ao assunto
+- Máximo 4 linhas
 - Emojis com moderação 🚗
-- Se quiser falar com humano: (51) 99364-2476
-- Nunca invente valores de FIPE`;
+- Humano: (51) 99364-2476`;
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
-
 app.get("/estoque", (req, res) => {
   res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual });
 });
-
 app.get("/fipe-teste", async (req, res) => {
-  const resultado = await consultarFipe("jeep", "renegade", 2016);
+  const resultado = await consultarFipe("toyota", "yaris", 2019);
   res.json(resultado || { erro: "Não encontrado" });
 });
 
@@ -117,10 +161,9 @@ app.post("/webhook", async (req, res) => {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (msg && msg.type === "text") {
 
-      // Evita processar a mesma mensagem duas vezes
       const msgId = msg.id;
       if (mensagensProcessadas.has(msgId)) {
-        console.log("Mensagem duplicada ignorada:", msgId);
+        console.log("Duplicada ignorada:", msgId);
         return res.sendStatus(200);
       }
       mensagensProcessadas.add(msgId);
@@ -132,22 +175,21 @@ app.post("/webhook", async (req, res) => {
 
       if (!conversas[from]) conversas[from] = [];
       conversas[from].push({ role: "user", content: text });
+      if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
-      if (conversas[from].length > 20) {
-        conversas[from] = conversas[from].slice(-20);
-      }
+      // Extrai info do veículo do histórico completo da conversa
+      const todosTextos = conversas[from]
+        .filter(m => m.role === "user")
+        .map(m => m.content);
 
-      // Consulta FIPE quando detecta marca + ano
+      const { marca, modelo, ano } = extrairInfoVeiculo(todosTextos);
       let fipeInfo = null;
-      const textLower = text.toLowerCase();
-      const marcasComuns = ["jeep", "volkswagen", "vw", "honda", "toyota", "chevrolet", "ford", "hyundai", "fiat", "renault", "nissan", "mitsubishi", "kia", "bmw", "mercedes", "audi", "peugeot", "citroen"];
-      const marcaDetectada = marcasComuns.find(m => textLower.includes(m));
-      const anoMatch = text.match(/\b(19|20)\d{2}\b/);
 
-      if (marcaDetectada && anoMatch) {
-        console.log(`Consultando FIPE: ${marcaDetectada} ${anoMatch[0]}`);
-        fipeInfo = await consultarFipe(marcaDetectada, text, anoMatch[0]);
-        if (fipeInfo) console.log("FIPE encontrada:", fipeInfo.Valor);
+      if (marca && ano) {
+        console.log(`Consultando FIPE: ${marca} ${modelo} ${ano}`);
+        fipeInfo = await consultarFipe(marca, modelo, ano);
+        if (fipeInfo) console.log("FIPE:", fipeInfo.Valor);
+        else console.log("FIPE não encontrada para:", marca, modelo, ano);
       }
 
       try {
@@ -175,7 +217,7 @@ app.post("/webhook", async (req, res) => {
           { messaging_product: "whatsapp", to: from, text: { body: reply } },
           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
         );
-        console.log(`Resposta enviada para ${from}: ${reply}`);
+        console.log(`Resposta para ${from}: ${reply}`);
       } catch (e) {
         console.error("Erro:", e.message);
         if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
@@ -213,3 +255,4 @@ app.get("/assinar-webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
+          
