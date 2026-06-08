@@ -21,7 +21,33 @@ function formatarEstoque() {
   ).join("\n");
 }
 
-const SYSTEM_PROMPT = () => `Você é Sara, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
+async function consultarFipe(marca, modelo, ano) {
+  try {
+    const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
+    const marcaEncontrada = marcasRes.data.find(m =>
+      m.nome.toLowerCase().includes(marca.toLowerCase())
+    );
+    if (!marcaEncontrada) return null;
+
+    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos`);
+    const modeloEncontrado = modelosRes.data.modelos.find(m =>
+      m.nome.toLowerCase().includes(modelo.toLowerCase())
+    );
+    if (!modeloEncontrado) return null;
+
+    const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos`);
+    const anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
+    if (!anoEncontrado) return null;
+
+    const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos/${anoEncontrado.codigo}`);
+    return valorRes.data;
+  } catch (e) {
+    console.error("Erro FIPE:", e.message);
+    return null;
+  }
+}
+
+const SYSTEM_PROMPT = (fipeInfo) => `Você é Sara, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
 EMPRESA:
 - Endereço: Av. Aparício Borges, 931 - Porto Alegre/RS
@@ -42,8 +68,9 @@ PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Ca
 
 AVALIAÇÃO DE TROCA:
 Quando cliente quiser trocar, pergunte: marca/modelo/ano, quilometragem, estado geral.
-Use tabela FIPE e desconto médio de 10-15% para veículos usados no RS.
-Dê uma estimativa de valor e diga que a avaliação final é presencial.
+${fipeInfo ? `FIPE CONSULTADA: ${fipeInfo.modelo} ${fipeInfo.anoModelo} = ${fipeInfo.valor}. Valor de troca = 20% abaixo = R$ ${Math.round(parseFloat(fipeInfo.valor.replace("R$ ", "").replace(".", "").replace(",", ".")) * 0.8).toLocaleString("pt-BR")}` : "Use a tabela FIPE e aplique 20% de desconto para calcular o valor de troca."}
+Seja transparente: explique que o desconto de 20% é padrão de mercado.
+A avaliação final é sempre presencial.
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
@@ -61,6 +88,11 @@ app.get("/", (req, res) => res.send("Agente funcionando!"));
 
 app.get("/estoque", (req, res) => {
   res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual });
+});
+
+app.get("/fipe-teste", async (req, res) => {
+  const resultado = await consultarFipe("jeep", "renegade", 2016);
+  res.json(resultado || { erro: "Não encontrado" });
 });
 
 app.get("/webhook", (req, res) => {
@@ -87,13 +119,24 @@ app.post("/webhook", async (req, res) => {
         conversas[from] = conversas[from].slice(-20);
       }
 
+      let fipeInfo = null;
+      const textLower = text.toLowerCase();
+      const marcasComuns = ["jeep", "volkswagen", "honda", "toyota", "chevrolet", "ford", "hyundai", "fiat", "renault", "nissan", "mitsubishi", "kia", "bmw", "mercedes", "audi"];
+      const marcaDetectada = marcasComuns.find(m => textLower.includes(m));
+      if (marcaDetectada && (textLower.includes("troc") || textLower.includes("vend") || textLower.includes("fipe") || textLower.includes("valor"))) {
+        const anoMatch = text.match(/\b(19|20)\d{2}\b/);
+        if (anoMatch) {
+          fipeInfo = await consultarFipe(marcaDetectada, text, anoMatch[0]);
+        }
+      }
+
       try {
         const claude = await axios.post(
           "https://api.anthropic.com/v1/messages",
           {
             model: "claude-sonnet-4-5",
             max_tokens: 500,
-            system: SYSTEM_PROMPT(),
+            system: SYSTEM_PROMPT(fipeInfo),
             messages: conversas[from]
           },
           {
