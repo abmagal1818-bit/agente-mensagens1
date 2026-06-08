@@ -7,12 +7,11 @@ const VERIFY_TOKEN = "meu_token_verificacao";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const MOBIAUTO_EMAIL = process.env.MOBIAUTO_EMAIL;
-const MOBIAUTO_SENHA = process.env.MOBIAUTO_SENHA;
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
 const conversas = {};
+const mensagensProcessadas = new Set();
 
 function formatarEstoque() {
   if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
@@ -47,6 +46,12 @@ async function consultarFipe(marca, modelo, ano) {
   }
 }
 
+function calcularValorTroca(valorFipeStr) {
+  const valor = parseFloat(valorFipeStr.replace("R$ ", "").replace(/\./g, "").replace(",", "."));
+  const troca = Math.round(valor * 0.8);
+  return { fipe: valor, troca, trocaFormatado: troca.toLocaleString("pt-BR"), fipeFormatado: valor.toLocaleString("pt-BR") };
+}
+
 const SYSTEM_PROMPT = (fipeInfo) => `Você é Sara, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
 EMPRESA:
@@ -67,10 +72,13 @@ ${formatarEstoque()}
 PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
 
 AVALIAÇÃO DE TROCA:
-Quando cliente quiser trocar, pergunte: marca/modelo/ano, quilometragem, estado geral.
-${fipeInfo ? `FIPE CONSULTADA: ${fipeInfo.modelo} ${fipeInfo.anoModelo} = ${fipeInfo.valor}. Valor de troca = 20% abaixo = R$ ${Math.round(parseFloat(fipeInfo.valor.replace("R$ ", "").replace(".", "").replace(",", ".")) * 0.8).toLocaleString("pt-BR")}` : "Use a tabela FIPE e aplique 20% de desconto para calcular o valor de troca."}
-Seja transparente: explique que o desconto de 20% é padrão de mercado.
-A avaliação final é sempre presencial.
+${fipeInfo ?
+  `FIPE OFICIAL CONSULTADA AGORA: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor} (${fipeInfo.MesReferencia}).
+  Valor de troca = 20% abaixo da FIPE = R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}.
+  USE EXATAMENTE ESSES VALORES. Não use outros valores.` :
+  `Quando cliente mencionar marca+ano do veículo para troca, informe que está consultando a FIPE.
+  IMPORTANTE: Nunca invente valores de FIPE. Sempre diga que vai consultar.`}
+Desconto de 20% é padrão de mercado RS. Avaliação final é presencial.
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
@@ -82,7 +90,7 @@ REGRAS:
 - Máximo 4 linhas por resposta
 - Emojis com moderação 🚗
 - Se quiser falar com humano: (51) 99364-2476
-- Nunca invente informações sobre estoque`;
+- Nunca invente valores de FIPE`;
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
 
@@ -108,6 +116,16 @@ app.post("/webhook", async (req, res) => {
   if (body.object === "whatsapp_business_account") {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (msg && msg.type === "text") {
+
+      // Evita processar a mesma mensagem duas vezes
+      const msgId = msg.id;
+      if (mensagensProcessadas.has(msgId)) {
+        console.log("Mensagem duplicada ignorada:", msgId);
+        return res.sendStatus(200);
+      }
+      mensagensProcessadas.add(msgId);
+      setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
+
       const from = msg.from;
       const text = msg.text.body;
       console.log(`Mensagem de ${from}: ${text}`);
@@ -119,15 +137,17 @@ app.post("/webhook", async (req, res) => {
         conversas[from] = conversas[from].slice(-20);
       }
 
+      // Consulta FIPE quando detecta marca + ano
       let fipeInfo = null;
       const textLower = text.toLowerCase();
-      const marcasComuns = ["jeep", "volkswagen", "honda", "toyota", "chevrolet", "ford", "hyundai", "fiat", "renault", "nissan", "mitsubishi", "kia", "bmw", "mercedes", "audi"];
+      const marcasComuns = ["jeep", "volkswagen", "vw", "honda", "toyota", "chevrolet", "ford", "hyundai", "fiat", "renault", "nissan", "mitsubishi", "kia", "bmw", "mercedes", "audi", "peugeot", "citroen"];
       const marcaDetectada = marcasComuns.find(m => textLower.includes(m));
-      if (marcaDetectada && (textLower.includes("troc") || textLower.includes("vend") || textLower.includes("fipe") || textLower.includes("valor"))) {
-        const anoMatch = text.match(/\b(19|20)\d{2}\b/);
-        if (anoMatch) {
-          fipeInfo = await consultarFipe(marcaDetectada, text, anoMatch[0]);
-        }
+      const anoMatch = text.match(/\b(19|20)\d{2}\b/);
+
+      if (marcaDetectada && anoMatch) {
+        console.log(`Consultando FIPE: ${marcaDetectada} ${anoMatch[0]}`);
+        fipeInfo = await consultarFipe(marcaDetectada, text, anoMatch[0]);
+        if (fipeInfo) console.log("FIPE encontrada:", fipeInfo.Valor);
       }
 
       try {
