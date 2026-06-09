@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const FormData = require("form-data");
 const app = express();
 app.use(express.json());
 
@@ -7,6 +8,7 @@ const VERIFY_TOKEN = "meu_token_verificacao";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -33,9 +35,17 @@ async function consultarFipe(marca, modelo, ano) {
     if (!marcaEncontrada) return null;
 
     const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos`);
-    const modeloEncontrado = modelosRes.data.modelos.find(m =>
-      m.nome.toLowerCase().includes(modelo.toLowerCase())
-    );
+    
+    // Busca inteligente — pega o modelo mais parecido
+    const modelosOrdenados = modelosRes.data.modelos
+      .filter(m => m.nome.toLowerCase().includes(modelo.toLowerCase().split(" ")[0]))
+      .sort((a, b) => {
+        const aScore = modelo.toLowerCase().split(" ").filter(p => a.nome.toLowerCase().includes(p)).length;
+        const bScore = modelo.toLowerCase().split(" ").filter(p => b.nome.toLowerCase().includes(p)).length;
+        return bScore - aScore;
+      });
+
+    const modeloEncontrado = modelosOrdenados[0];
     if (!modeloEncontrado) return null;
 
     const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos`);
@@ -44,6 +54,7 @@ async function consultarFipe(marca, modelo, ano) {
 
     const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos/${anoEncontrado.codigo}`);
     fipeCache[chave] = valorRes.data;
+    console.log(`FIPE encontrada: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
     return valorRes.data;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
@@ -53,31 +64,42 @@ async function consultarFipe(marca, modelo, ano) {
 
 function extrairInfoVeiculo(textos) {
   const texto = textos.join(" ").toLowerCase();
-  const marcasComuns = {
-    "toyota": "toyota", "yaris": "toyota", "corolla": "toyota", "hilux": "toyota",
-    "jeep": "jeep", "renegade": "jeep", "compass": "jeep",
-    "volkswagen": "volkswagen", "vw": "volkswagen", "jetta": "volkswagen", "polo": "volkswagen", "gol": "volkswagen",
-    "honda": "honda", "civic": "honda", "hrv": "honda", "fit": "honda",
-    "chevrolet": "chevrolet", "onix": "chevrolet", "cruze": "chevrolet", "tracker": "chevrolet",
-    "ford": "ford", "ka": "ford", "ecosport": "ford", "ranger": "ford",
-    "hyundai": "hyundai", "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai",
-    "fiat": "fiat", "argo": "fiat", "pulse": "fiat", "toro": "fiat", "strada": "fiat",
-    "renault": "renault", "kwid": "renault", "sandero": "renault", "duster": "renault",
-    "nissan": "nissan", "kicks": "nissan", "versa": "nissan",
-    "bmw": "bmw", "mercedes": "mercedes", "audi": "audi",
-    "mitsubishi": "mitsubishi", "eclipse": "mitsubishi", "pajero": "mitsubishi",
-    "kia": "kia", "sportage": "kia", "cerato": "kia"
+  const marcasModelos = {
+    "toyota": ["yaris", "corolla", "hilux", "sw4", "etios", "prius"],
+    "jeep": ["renegade", "compass", "commander", "wrangler"],
+    "volkswagen": ["jetta", "polo", "gol", "virtus", "t-cross", "tiguan", "amarok"],
+    "honda": ["civic", "hrv", "crv", "fit", "city", "wr-v"],
+    "chevrolet": ["onix", "cruze", "tracker", "s10", "spin", "cobalt"],
+    "ford": ["ka", "ecosport", "ranger", "bronco", "territory"],
+    "hyundai": ["hb20", "creta", "tucson", "ix35", "santa fe"],
+    "fiat": ["argo", "pulse", "toro", "strada", "mobi", "cronos", "ducato"],
+    "renault": ["kwid", "sandero", "duster", "captur", "logan"],
+    "nissan": ["kicks", "versa", "frontier", "sentra"],
+    "bmw": ["320", "328", "x1", "x3", "x5"],
+    "mercedes": ["c180", "c200", "a200", "gla", "glc"],
+    "audi": ["a3", "a4", "q3", "q5"],
+    "mitsubishi": ["eclipse", "pajero", "outlander", "asx"],
+    "kia": ["sportage", "cerato", "stinger", "sorento"],
+    "peugeot": ["208", "308", "2008", "3008"],
+    "citroen": ["c3", "c4", "aircross"]
   };
 
   let marcaDetectada = null;
   let modeloDetectado = null;
 
-  for (const [palavra, marca] of Object.entries(marcasComuns)) {
-    if (texto.includes(palavra)) {
+  for (const [marca, modelos] of Object.entries(marcasModelos)) {
+    if (texto.includes(marca)) {
       marcaDetectada = marca;
-      modeloDetectado = palavra;
-      break;
+      modeloDetectado = marca;
     }
+    for (const modelo of modelos) {
+      if (texto.includes(modelo)) {
+        marcaDetectada = marca;
+        modeloDetectado = modelo;
+        break;
+      }
+    }
+    if (modeloDetectado && modeloDetectado !== marca) break;
   }
 
   const anoMatch = texto.match(/\b(19|20)\d{2}\b/);
@@ -89,12 +111,48 @@ function extrairInfoVeiculo(textos) {
 function calcularValorTroca(valorFipeStr) {
   const valor = parseFloat(valorFipeStr.replace("R$ ", "").replace(/\./g, "").replace(",", "."));
   const troca = Math.round(valor * 0.8);
-  return {
-    fipe: valor,
-    troca,
-    trocaFormatado: troca.toLocaleString("pt-BR"),
-    fipeFormatado: valor.toLocaleString("pt-BR")
-  };
+  return { fipeFormatado: valor.toLocaleString("pt-BR"), trocaFormatado: troca.toLocaleString("pt-BR") };
+}
+
+async function transcreverAudio(mediaId) {
+  try {
+    // Busca URL do áudio
+    const mediaRes = await axios.get(
+      `https://graph.facebook.com/v25.0/${mediaId}`,
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    const audioUrl = mediaRes.data.url;
+
+    // Baixa o áudio
+    const audioRes = await axios.get(audioUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: "arraybuffer"
+    });
+
+    // Envia para Groq Whisper
+    const formData = new FormData();
+    formData.append("file", Buffer.from(audioRes.data), {
+      filename: "audio.ogg",
+      contentType: "audio/ogg"
+    });
+    formData.append("model", "whisper-large-v3");
+    formData.append("language", "pt");
+
+    const transcricaoRes = await axios.post(
+      "https://api.groq.com/openai/v1/audio/transcriptions",
+      formData,
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          ...formData.getHeaders()
+        }
+      }
+    );
+    return transcricaoRes.data.text;
+  } catch (e) {
+    console.error("Erro transcrição:", e.message);
+    return null;
+  }
 }
 
 const SYSTEM_PROMPT = (fipeInfo) => `Você é Sara, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -117,13 +175,13 @@ PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Ca
 
 AVALIAÇÃO DE TROCA:
 ${fipeInfo ?
-    `✅ FIPE OFICIAL CONSULTADA AGORA (${fipeInfo.MesReferencia}):
+    `✅ FIPE OFICIAL (${fipeInfo.MesReferencia}):
 Modelo: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo}
 FIPE: ${fipeInfo.Valor}
 Valor de troca (20% abaixo): R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}
-⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO usar outros valores de FIPE.` :
-    `⚠️ NUNCA invente valores de FIPE. Se não tiver FIPE consultada, diga apenas:
-"Preciso de mais detalhes do seu veículo para consultar a FIPE: qual a marca, modelo e ano?"`
+⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO inventar outros valores.` :
+    `⚠️ NUNCA invente valores de FIPE. Se não tiver FIPE consultada, diga:
+"Me informa a marca, modelo e ano do seu veículo para eu consultar a FIPE!"`
   }
 Desconto de 20% é padrão de mercado RS. Avaliação final é sempre presencial.
 
@@ -138,14 +196,50 @@ REGRAS:
 - Emojis com moderação 🚗
 - Humano: (51) 99364-2476`;
 
+async function processarMensagem(from, text) {
+  if (!conversas[from]) conversas[from] = [];
+  conversas[from].push({ role: "user", content: text });
+  if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
+
+  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
+  const { marca, modelo, ano } = extrairInfoVeiculo(todosTextos);
+  let fipeInfo = null;
+
+  if (marca && ano) {
+    fipeInfo = await consultarFipe(marca, modelo, ano);
+  }
+
+  const claude = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      system: SYSTEM_PROMPT(fipeInfo),
+      messages: conversas[from]
+    },
+    {
+      headers: {
+        "x-api-key": CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+      }
+    }
+  );
+
+  const reply = claude.data.content[0].text;
+  conversas[from].push({ role: "assistant", content: reply });
+
+  await axios.post(
+    `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    { messaging_product: "whatsapp", to: from, text: { body: reply } },
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+  );
+
+  console.log(`Resposta para ${from}: ${reply}`);
+}
+
 app.get("/", (req, res) => res.send("Agente funcionando!"));
-app.get("/estoque", (req, res) => {
-  res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual });
-});
-app.get("/fipe-teste", async (req, res) => {
-  const resultado = await consultarFipe("toyota", "yaris", 2019);
-  res.json(resultado || { erro: "Não encontrado" });
-});
+app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
@@ -157,74 +251,44 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   const body = req.body;
+  res.sendStatus(200);
+
   if (body.object === "whatsapp_business_account") {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (msg && msg.type === "text") {
+    if (!msg) return;
 
-      const msgId = msg.id;
-      if (mensagensProcessadas.has(msgId)) {
-        console.log("Duplicada ignorada:", msgId);
-        return res.sendStatus(200);
+    const msgId = msg.id;
+    if (mensagensProcessadas.has(msgId)) return;
+    mensagensProcessadas.add(msgId);
+    setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
+
+    const from = msg.from;
+
+    try {
+      if (msg.type === "text") {
+        const text = msg.text.body;
+        console.log(`Texto de ${from}: ${text}`);
+        await processarMensagem(from, text);
+
+      } else if (msg.type === "audio") {
+        console.log(`Áudio de ${from} — transcrevendo...`);
+        const texto = await transcreverAudio(msg.audio.id);
+        if (texto) {
+          console.log(`Transcrição: ${texto}`);
+          await processarMensagem(from, `[Áudio transcrito]: ${texto}`);
+        } else {
+          await axios.post(
+            `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+            { messaging_product: "whatsapp", to: from, text: { body: "Oi! 😊 Não consegui entender o áudio. Pode digitar sua mensagem?" } },
+            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+          );
+        }
       }
-      mensagensProcessadas.add(msgId);
-      setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
-
-      const from = msg.from;
-      const text = msg.text.body;
-      console.log(`Mensagem de ${from}: ${text}`);
-
-      if (!conversas[from]) conversas[from] = [];
-      conversas[from].push({ role: "user", content: text });
-      if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
-
-      // Extrai info do veículo do histórico completo da conversa
-      const todosTextos = conversas[from]
-        .filter(m => m.role === "user")
-        .map(m => m.content);
-
-      const { marca, modelo, ano } = extrairInfoVeiculo(todosTextos);
-      let fipeInfo = null;
-
-      if (marca && ano) {
-        console.log(`Consultando FIPE: ${marca} ${modelo} ${ano}`);
-        fipeInfo = await consultarFipe(marca, modelo, ano);
-        if (fipeInfo) console.log("FIPE:", fipeInfo.Valor);
-        else console.log("FIPE não encontrada para:", marca, modelo, ano);
-      }
-
-      try {
-        const claude = await axios.post(
-          "https://api.anthropic.com/v1/messages",
-          {
-            model: "claude-sonnet-4-5",
-            max_tokens: 500,
-            system: SYSTEM_PROMPT(fipeInfo),
-            messages: conversas[from]
-          },
-          {
-            headers: {
-              "x-api-key": CLAUDE_API_KEY,
-              "anthropic-version": "2023-06-01",
-              "content-type": "application/json"
-            }
-          }
-        );
-        const reply = claude.data.content[0].text;
-        conversas[from].push({ role: "assistant", content: reply });
-
-        await axios.post(
-          `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-          { messaging_product: "whatsapp", to: from, text: { body: reply } },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-        );
-        console.log(`Resposta para ${from}: ${reply}`);
-      } catch (e) {
-        console.error("Erro:", e.message);
-        if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
-      }
+    } catch (e) {
+      console.error("Erro:", e.message);
+      if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
     }
   }
-  res.sendStatus(200);
 });
 
 app.get("/registrar", async (req, res) => {
@@ -252,19 +316,6 @@ app.get("/assinar-webhook", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
-app.get("/fipe-buscar", async (req, res) => {
-  try {
-    const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
-    const toyota = marcasRes.data.find(m => m.nome.toLowerCase().includes("toyota"));
-    
-    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${toyota.codigo}/modelos`);
-    const yaris = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes("yaris"));
-    
-    res.json({ toyota, modelos_yaris: yaris });
-  } catch (e) {
-    res.send("Erro: " + e.message);
-  }
-});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
-          
