@@ -252,7 +252,19 @@ app.get("/assinar-webhook", async (req, res) => {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
 });
-
+app.get("/fipe-buscar", async (req, res) => {
+  try {
+    const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
+    const toyota = marcasRes.data.find(m => m.nome.toLowerCase().includes("toyota"));
+    
+    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${toyota.codigo}/modelos`);
+    const yaris = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes("yaris"));
+    
+    res.json({ toyota, modelos_yaris: yaris });
+  } catch (e) {
+    res.send("Erro: " + e.message);
+  }
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
           
