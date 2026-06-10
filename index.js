@@ -33,16 +33,16 @@ function extrairInfoVeiculo(textos) {
     "civic": "honda", "hrv": "honda", "crv": "honda", "fit": "honda", "city": "honda", "wrv": "honda", "wr-v": "honda",
     "onix": "chevrolet", "cruze": "chevrolet", "tracker": "chevrolet", "s10": "chevrolet", "spin": "chevrolet", "cobalt": "chevrolet",
     "ka": "ford", "ecosport": "ford", "ranger": "ford", "bronco": "ford", "territory": "ford",
-    "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai", "ix35": "hyundai", "santa fe": "hyundai",
-    "argo": "fiat", "pulse": "fiat", "toro": "fiat", "strada": "fiat", "mobi": "fiat", "cronos": "fiat", "ducato": "fiat",
+    "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai", "ix35": "hyundai",
+    "argo": "fiat", "pulse": "fiat", "toro": "fiat", "strada": "fiat", "mobi": "fiat", "cronos": "fiat",
     "kwid": "renault", "sandero": "renault", "duster": "renault", "captur": "renault", "logan": "renault",
     "kicks": "nissan", "versa": "nissan", "frontier": "nissan", "sentra": "nissan",
     "sportage": "kia", "cerato": "kia", "stinger": "kia", "sorento": "kia",
     "eclipse": "mitsubishi", "pajero": "mitsubishi", "outlander": "mitsubishi", "asx": "mitsubishi",
     "208": "peugeot", "2008": "peugeot", "3008": "peugeot", "308": "peugeot",
     "c3": "citroen", "c4": "citroen", "aircross": "citroen",
-    "320": "bmw", "328": "bmw", "x1": "bmw", "x3": "bmw", "x5": "bmw",
-    "c180": "mercedes", "c200": "mercedes", "a200": "mercedes", "gla": "mercedes", "glc": "mercedes",
+    "x1": "bmw", "x3": "bmw", "x5": "bmw",
+    "gla": "mercedes", "glc": "mercedes",
     "a3": "audi", "a4": "audi", "q3": "audi", "q5": "audi"
   };
 
@@ -85,28 +85,40 @@ async function consultarFipe(marca, modelo, ano) {
     const marcaEncontrada = marcasRes.data.find(m =>
       m.nome.toLowerCase().includes(marca.toLowerCase())
     );
-    if (!marcaEncontrada) return null;
+    if (!marcaEncontrada) {
+      console.log(`Marca não encontrada: ${marca}`);
+      return null;
+    }
+    console.log(`Marca encontrada: ${marcaEncontrada.nome} (${marcaEncontrada.codigo})`);
 
     const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos`);
 
-    const modelosOrdenados = modelosRes.data.modelos
-      .filter(m => m.nome.toLowerCase().includes(modelo.toLowerCase().split(" ")[0]))
-      .sort((a, b) => {
-        const aScore = modelo.toLowerCase().split(" ").filter(p => a.nome.toLowerCase().includes(p)).length;
-        const bScore = modelo.toLowerCase().split(" ").filter(p => b.nome.toLowerCase().includes(p)).length;
-        return bScore - aScore;
-      });
+    const primeiraWord = modelo.toLowerCase().split(" ")[0];
+    const modelosFiltrados = modelosRes.data.modelos.filter(m =>
+      m.nome.toLowerCase().includes(primeiraWord)
+    );
+    console.log(`Modelos encontrados para "${primeiraWord}": ${modelosFiltrados.length}`);
 
-    const modeloEncontrado = modelosOrdenados[0];
-    if (!modeloEncontrado) return null;
+    if (modelosFiltrados.length === 0) {
+      console.log("Nenhum modelo encontrado!");
+      return null;
+    }
+
+    const modeloEncontrado = modelosFiltrados[0];
+    console.log(`Modelo selecionado: ${modeloEncontrado.nome}`);
 
     const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos`);
     const anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
-    if (!anoEncontrado) return null;
+
+    if (!anoEncontrado) {
+      console.log(`Ano ${ano} não encontrado. Anos disponíveis:`, anosRes.data.map(a => a.nome).join(", "));
+      return null;
+    }
+    console.log(`Ano encontrado: ${anoEncontrado.nome}`);
 
     const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos/${anoEncontrado.codigo}`);
     fipeCache[chave] = valorRes.data;
-    console.log(`FIPE encontrada: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
+    console.log(`✅ FIPE encontrada: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
     return valorRes.data;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
