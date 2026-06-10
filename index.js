@@ -23,75 +23,60 @@ function formatarEstoque() {
   ).join("\n");
 }
 
-function extrairInfoVeiculo(textos) {
-  const texto = textos.join(" ").toLowerCase();
-
-  const modelosMarcas = {
-    "yaris": "toyota", "corolla": "toyota", "hilux": "toyota", "sw4": "toyota", "etios": "toyota", "rav4": "toyota",
-    "renegade": "jeep", "compass": "jeep", "commander": "jeep", "wrangler": "jeep",
-    "jetta": "volkswagen", "polo": "volkswagen", "gol": "volkswagen", "virtus": "volkswagen", "tcross": "volkswagen", "t-cross": "volkswagen", "tiguan": "volkswagen", "amarok": "volkswagen", "saveiro": "volkswagen",
-    "civic": "honda", "hrv": "honda", "crv": "honda", "fit": "honda", "city": "honda", "wrv": "honda",
-    "onix": "chevrolet", "cruze": "chevrolet", "tracker": "chevrolet", "s10": "chevrolet", "spin": "chevrolet", "cobalt": "chevrolet",
-    "ka": "ford", "ecosport": "ford", "ranger": "ford", "bronco": "ford", "territory": "ford",
-    "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai", "ix35": "hyundai",
-    "argo": "fiat", "pulse": "fiat", "toro": "fiat", "strada": "fiat", "mobi": "fiat", "cronos": "fiat",
-    "kwid": "renault", "sandero": "renault", "duster": "renault", "captur": "renault", "logan": "renault",
-    "kicks": "nissan", "versa": "nissan", "frontier": "nissan", "sentra": "nissan",
-    "sportage": "kia", "cerato": "kia", "stinger": "kia", "sorento": "kia",
-    "eclipse": "mitsubishi", "pajero": "mitsubishi", "outlander": "mitsubishi", "asx": "mitsubishi",
-    "208": "peugeot", "2008": "peugeot", "3008": "peugeot", "308": "peugeot",
-    "c3": "citroen", "c4": "citroen", "aircross": "citroen",
-    "x1": "bmw", "x3": "bmw", "x5": "bmw",
-    "gla": "mercedes", "glc": "mercedes",
-    "a3": "audi", "a4": "audi", "q3": "audi", "q5": "audi"
-  };
-
-  const marcasDiretas = ["toyota", "jeep", "volkswagen", "honda", "chevrolet", "ford", "hyundai", "fiat", "renault", "nissan", "bmw", "mercedes", "audi", "mitsubishi", "kia", "peugeot", "citroen"];
-
-  let marcaDetectada = null;
-  let modeloDetectado = null;
-
-  for (const [modelo, marca] of Object.entries(modelosMarcas)) {
-    if (texto.includes(modelo)) {
-      marcaDetectada = marca;
-      modeloDetectado = modelo;
-      break;
-    }
-  }
-
-  if (!marcaDetectada) {
-    for (const marca of marcasDiretas) {
-      if (texto.includes(marca)) {
-        marcaDetectada = marca;
-        modeloDetectado = marca;
-        break;
-      }
-    }
-  }
-
-  const anoMatch = texto.match(/\b(19|20)\d{2}\b/);
-  const ano = anoMatch ? anoMatch[0] : null;
-
-  console.log(`Detectado: marca=${marcaDetectada} modelo=${modeloDetectado} ano=${ano}`);
-  return { marca: marcaDetectada, modelo: modeloDetectado, ano };
-}
-
-async function encontrarCodigoFipe(marcaCodigo, nomeModelo, ano) {
+async function extrairInfoVeiculoComClaude(textos) {
   try {
-    // Busca todos os modelos da marca
-    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos`);
-    const todosModelos = modelosRes.data.modelos;
-
-    // Usa o Claude para identificar o modelo correto na lista
-    const listaModelos = todosModelos.map(m => `${m.codigo}: ${m.nome}`).join("\n");
-    const claudeRes = await axios.post(
+    const texto = textos.join(" ");
+    const res = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
         model: "claude-sonnet-4-5",
         max_tokens: 100,
         messages: [{
           role: "user",
-          content: `Da lista abaixo, qual é o código do modelo mais parecido com "${nomeModelo} ${ano}"? 
+          content: `Do texto abaixo, extraia as informações do veículo que o cliente quer vender ou dar na troca.
+Responda APENAS em JSON no formato: {"marca": "...", "modelo": "...", "ano": "..."}
+Se não encontrar algum campo, coloque null.
+Exemplos de resposta:
+- {"marca": "hyundai", "modelo": "santa fe", "ano": "2012"}
+- {"marca": "toyota", "modelo": "yaris", "ano": "2019"}
+- {"marca": null, "modelo": null, "ano": null}
+
+Texto: "${texto}"`
+        }]
+      },
+      {
+        headers: {
+          "x-api-key": CLAUDE_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        }
+      }
+    );
+
+    const resposta = res.data.content[0].text.trim();
+    const json = JSON.parse(resposta);
+    console.log(`Extraído pelo Claude: marca=${json.marca} modelo=${json.modelo} ano=${json.ano}`);
+    return json;
+  } catch (e) {
+    console.error("Erro ao extrair info veículo:", e.message);
+    return { marca: null, modelo: null, ano: null };
+  }
+}
+
+async function encontrarCodigoFipe(marcaCodigo, nomeModelo, ano) {
+  try {
+    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos`);
+    const todosModelos = modelosRes.data.modelos;
+    const listaModelos = todosModelos.map(m => `${m.codigo}: ${m.nome}`).join("\n");
+
+    const claudeRes = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 50,
+        messages: [{
+          role: "user",
+          content: `Da lista abaixo, qual é o código do modelo mais parecido com "${nomeModelo} ${ano}"?
 Responda APENAS com o número do código, sem mais nada.
 
 ${listaModelos}`
@@ -106,19 +91,15 @@ ${listaModelos}`
       }
     );
 
-    const codigoModelo = claudeRes.data.content[0].text.trim();
-    console.log(`Claude selecionou código: ${codigoModelo}`);
+    const codigoModelo = claudeRes.data.content[0].text.trim().replace(/\D/g, "");
+    console.log(`Claude selecionou código modelo: ${codigoModelo}`);
 
-    // Busca anos disponíveis para esse modelo
     const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos`);
-    
-    // Tenta encontrar o ano exato
     let anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
-    
-    // Se não achar, pega o mais próximo
+
     if (!anoEncontrado) {
-      const anosDisponiveis = anosRes.data.filter(a => !a.nome.includes("32000"));
-      anoEncontrado = anosDisponiveis[0];
+      const anosValidos = anosRes.data.filter(a => !a.nome.includes("32000"));
+      anoEncontrado = anosValidos[0];
       console.log(`Ano ${ano} não encontrado, usando: ${anoEncontrado?.nome}`);
     }
 
@@ -126,7 +107,6 @@ ${listaModelos}`
 
     const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos/${anoEncontrado.codigo}`);
     return valorRes.data;
-
   } catch (e) {
     console.error("Erro encontrarCodigoFipe:", e.message);
     return null;
@@ -142,22 +122,39 @@ async function consultarFipe(marca, modelo, ano) {
 
   try {
     const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
-    const marcaEncontrada = marcasRes.data.find(m =>
-      m.nome.toLowerCase().includes(marca.toLowerCase())
-    );
-    if (!marcaEncontrada) {
-      console.log(`Marca não encontrada: ${marca}`);
-      return null;
-    }
-    console.log(`Marca encontrada: ${marcaEncontrada.nome} (${marcaEncontrada.codigo})`);
 
-    const resultado = await encontrarCodigoFipe(marcaEncontrada.codigo, modelo, ano);
-    
+    // Claude escolhe a marca correta na lista da FIPE
+    const listaMarcas = marcasRes.data.map(m => `${m.codigo}: ${m.nome}`).join("\n");
+    const claudeMarcaRes = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 20,
+        messages: [{
+          role: "user",
+          content: `Da lista abaixo, qual é o código da marca "${marca}"?
+Responda APENAS com o número do código, sem mais nada.
+
+${listaMarcas}`
+        }]
+      },
+      {
+        headers: {
+          "x-api-key": CLAUDE_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        }
+      }
+    );
+
+    const codigoMarca = claudeMarcaRes.data.content[0].text.trim().replace(/\D/g, "");
+    console.log(`Claude selecionou código marca: ${codigoMarca}`);
+
+    const resultado = await encontrarCodigoFipe(codigoMarca, modelo, ano);
     if (resultado) {
       fipeCache[chave] = resultado;
       console.log(`✅ FIPE encontrada: ${resultado.Modelo} = ${resultado.Valor}`);
     }
-    
     return resultado;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
@@ -257,10 +254,12 @@ async function processarMensagem(from, text) {
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
-  const { marca, modelo, ano } = extrairInfoVeiculo(todosTextos);
+  
+  // Claude extrai marca/modelo/ano de qualquer texto
+  const { marca, modelo, ano } = await extrairInfoVeiculoComClaude(todosTextos);
   let fipeInfo = null;
 
-  if (marca && ano) {
+  if (marca && modelo && ano) {
     fipeInfo = await consultarFipe(marca, modelo, ano);
   }
 
@@ -324,7 +323,6 @@ app.post("/webhook", async (req, res) => {
         const text = msg.text.body;
         console.log(`Texto de ${from}: ${text}`);
         await processarMensagem(from, text);
-
       } else if (msg.type === "audio") {
         console.log(`Áudio de ${from} — transcrevendo...`);
         const texto = await transcreverAudio(msg.audio.id);
