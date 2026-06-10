@@ -15,6 +15,7 @@ let ultimaAtualizacao = null;
 const conversas = {};
 const mensagensProcessadas = new Set();
 const fipeCache = {};
+let cacheMarcasFipe = null;
 
 function formatarEstoque() {
   if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
@@ -23,23 +24,33 @@ function formatarEstoque() {
   ).join("\n");
 }
 
-async function extrairInfoVeiculoComClaude(textos) {
+async function getMarcasFipe() {
+  if (cacheMarcasFipe) return cacheMarcasFipe;
+  const res = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
+  cacheMarcasFipe = res.data;
+  return cacheMarcasFipe;
+}
+
+async function extrairVeiculoParaTroca(textos) {
   try {
     const texto = textos.join(" ");
     const res = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
         model: "claude-sonnet-4-5",
-        max_tokens: 100,
+        max_tokens: 150,
         messages: [{
           role: "user",
-          content: `Do texto abaixo, extraia as informações do veículo que o cliente quer vender ou dar na troca.
-Responda APENAS em JSON no formato: {"marca": "...", "modelo": "...", "ano": "..."}
-Se não encontrar algum campo, coloque null.
-Exemplos de resposta:
-- {"marca": "hyundai", "modelo": "santa fe", "ano": "2012"}
-- {"marca": "toyota", "modelo": "yaris", "ano": "2019"}
-- {"marca": null, "modelo": null, "ano": null}
+          content: `Analise esse texto de conversa e extraia o veículo que o cliente quer VENDER ou DAR NA TROCA (não o que ele quer comprar).
+Responda APENAS em JSON válido: {"marca": "...", "modelo": "...", "ano": "..."}
+Use nomes simples em minúsculo: "volkswagen", "hyundai", "toyota", etc.
+Se não tiver informação suficiente, coloque null.
+
+Exemplos:
+- "tenho um gol 2012" → {"marca": "volkswagen", "modelo": "gol", "ano": "2012"}
+- "santa fé 2012" → {"marca": "hyundai", "modelo": "santa fe", "ano": "2012"}
+- "meu yaris 2019" → {"marca": "toyota", "modelo": "yaris", "ano": "2019"}
+- "quero comprar um jetta" → {"marca": null, "modelo": null, "ano": null}
 
 Texto: "${texto}"`
         }]
@@ -54,66 +65,20 @@ Texto: "${texto}"`
     );
 
     const resposta = res.data.content[0].text.trim();
-    const json = JSON.parse(resposta);
-    console.log(`Extraído pelo Claude: marca=${json.marca} modelo=${json.modelo} ano=${json.ano}`);
+    const jsonMatch = resposta.match(/\{[^}]+\}/);
+    if (!jsonMatch) return { marca: null, modelo: null, ano: null };
+    const json = JSON.parse(jsonMatch[0]);
+    console.log(`Veículo para troca: marca=${json.marca} modelo=${json.modelo} ano=${json.ano}`);
     return json;
   } catch (e) {
-    console.error("Erro ao extrair info veículo:", e.message);
+    console.error("Erro ao extrair veículo:", e.message);
     return { marca: null, modelo: null, ano: null };
   }
 }
 
-async function encontrarCodigoFipe(marcaCodigo, nomeModelo, ano) {
-  try {
-    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos`);
-    const todosModelos = modelosRes.data.modelos;
-    const listaModelos = todosModelos.map(m => `${m.codigo}: ${m.nome}`).join("\n");
-
-    const claudeRes = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 50,
-        messages: [{
-          role: "user",
-          content: `Da lista abaixo, qual é o código do modelo mais parecido com "${nomeModelo} ${ano}"?
-Responda APENAS com o número do código, sem mais nada.
-
-${listaModelos}`
-        }]
-      },
-      {
-        headers: {
-          "x-api-key": CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json"
-        }
-      }
-    );
-
-    const codigoModelo = claudeRes.data.content[0].text.trim().replace(/\D/g, "");
-    console.log(`Claude selecionou código modelo: ${codigoModelo}`);
-
-    const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos`);
-    let anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
-
-    if (!anoEncontrado) {
-      const anosValidos = anosRes.data.filter(a => !a.nome.includes("32000"));
-      anoEncontrado = anosValidos[0];
-      console.log(`Ano ${ano} não encontrado, usando: ${anoEncontrado?.nome}`);
-    }
-
-    if (!anoEncontrado) return null;
-
-    const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos/${anoEncontrado.codigo}`);
-    return valorRes.data;
-  } catch (e) {
-    console.error("Erro encontrarCodigoFipe:", e.message);
-    return null;
-  }
-}
-
 async function consultarFipe(marca, modelo, ano) {
+  if (!marca || !modelo || !ano) return null;
+
   const chave = `${marca}-${modelo}-${ano}`.toLowerCase();
   if (fipeCache[chave]) {
     console.log(`FIPE do cache: ${fipeCache[chave].Valor}`);
@@ -121,51 +86,71 @@ async function consultarFipe(marca, modelo, ano) {
   }
 
   try {
-    const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
+    const marcas = await getMarcasFipe();
 
-    // Claude escolhe a marca correta na lista da FIPE
-    const listaMarcas = marcasRes.data.map(m => `${m.codigo}: ${m.nome}`).join("\n");
-    const claudeMarcaRes = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 20,
-        messages: [{
-          role: "user",
-          content: `Da lista abaixo, qual é o código da marca "${marca}"?
-Responda APENAS com o número do código, sem mais nada.
-
-${listaMarcas}`
-        }]
-      },
-      {
-        headers: {
-          "x-api-key": CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json"
-        }
-      }
+    const marcaFipe = marcas.find(m =>
+      m.nome.toLowerCase().includes(marca.toLowerCase()) ||
+      marca.toLowerCase().includes(m.nome.toLowerCase().split(" ")[0])
     );
 
-    const codigoMarca = claudeMarcaRes.data.content[0].text.trim().replace(/\D/g, "");
-    console.log(`Claude selecionou código marca: ${codigoMarca}`);
-
-    const resultado = await encontrarCodigoFipe(codigoMarca, modelo, ano);
-    if (resultado) {
-      fipeCache[chave] = resultado;
-      console.log(`✅ FIPE encontrada: ${resultado.Modelo} = ${resultado.Valor}`);
+    if (!marcaFipe) {
+      console.log(`Marca não encontrada na FIPE: ${marca}`);
+      return null;
     }
-    return resultado;
+    console.log(`Marca FIPE: ${marcaFipe.nome} (${marcaFipe.codigo})`);
+
+    const modelosRes = await axios.get(
+      `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`
+    );
+
+    const primeirapalavra = modelo.toLowerCase().split(" ")[0];
+    const modelosCandidatos = modelosRes.data.modelos.filter(m =>
+      m.nome.toLowerCase().includes(primeirapalavra)
+    );
+
+    if (modelosCandidatos.length === 0) {
+      console.log(`Modelo não encontrado: ${modelo}`);
+      return null;
+    }
+
+    for (const candidato of modelosCandidatos) {
+      const anosRes = await axios.get(
+        `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos`
+      );
+
+      const anoFipe = anosRes.data.find(a =>
+        a.nome.includes(ano.toString()) && !a.nome.includes("32000")
+      );
+
+      if (anoFipe) {
+        console.log(`Modelo: ${candidato.nome} | Ano: ${anoFipe.nome}`);
+        const valorRes = await axios.get(
+          `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos/${anoFipe.codigo}`
+        );
+        fipeCache[chave] = valorRes.data;
+        console.log(`✅ FIPE: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
+        return valorRes.data;
+      }
+    }
+
+    console.log(`Ano ${ano} não encontrado para ${marca} ${modelo}`);
+    return null;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
     return null;
   }
 }
 
-function calcularValorTroca(valorFipeStr) {
+function calcularValoresTroca(valorFipeStr) {
   const valor = parseFloat(valorFipeStr.replace("R$ ", "").replace(/\./g, "").replace(",", "."));
-  const troca = Math.round(valor * 0.8);
-  return { fipeFormatado: valor.toLocaleString("pt-BR"), trocaFormatado: troca.toLocaleString("pt-BR") };
+  const minimo = Math.round(valor * 0.80);
+  const maximo = Math.round(valor * 0.85);
+  return {
+    fipe: valor,
+    fipeFormatado: valor.toLocaleString("pt-BR"),
+    minimoFormatado: minimo.toLocaleString("pt-BR"),
+    maximoFormatado: maximo.toLocaleString("pt-BR")
+  };
 }
 
 async function transcreverAudio(mediaId) {
@@ -225,21 +210,30 @@ ${formatarEstoque()}
 PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
 
 AVALIAÇÃO DE TROCA:
-${fipeInfo ?
-    `✅ FIPE OFICIAL CONSULTADA (${fipeInfo.MesReferencia}):
-Modelo: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo}
-FIPE: ${fipeInfo.Valor}
-Valor de troca (20% abaixo da FIPE): R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}
-⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO usar outros valores.` :
-    `⚠️ NUNCA invente valores de FIPE.
-Se não tiver FIPE consultada, diga APENAS:
-"Me informa a marca, modelo e ano do seu veículo para eu consultar a FIPE!"`
+${fipeInfo ? (() => {
+  const v = calcularValoresTroca(fipeInfo.Valor);
+  return `✅ FIPE CONSULTADA (${fipeInfo.MesReferencia}):
+Veículo: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor}
+Faixa de avaliação na troca: R$ ${v.minimoFormatado} a R$ ${v.maximoFormatado}
+(varia conforme estado de conservação, revisões e documentação)
+
+REGRAS DE APRESENTAÇÃO:
+- Apresente DIRETAMENTE a faixa de valor: "Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca"
+- NÃO mencione percentuais, FIPE ou desconto
+- Diga que a avaliação final é presencial
+- Se o carro estiver em ótimo estado → valor mais próximo de R$ ${v.maximoFormatado}
+- Se tiver alta quilometragem ou problemas → valor mais próximo de R$ ${v.minimoFormatado}`;
+})() :
+    `⚠️ FIPE ainda não consultada.
+PROIBIDO inventar ou estimar valores.
+Se cliente mencionar veículo para troca sem ter os dados completos, pergunte marca, modelo e ano.
+Se não conseguir consultar, diga: "Não consegui consultar agora. Ligue (51) 99364-2476 ou venha à loja!"`
   }
-Desconto de 20% é padrão de mercado RS. Avaliação final sempre presencial.
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
 Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
+Apresente o valor da parcela diretamente, sem mencionar a fórmula.
 
 REGRAS:
 - Primeira mensagem: "Oi! 😊 Aqui é a Sara da Premium Automarcas!"
@@ -253,10 +247,11 @@ async function processarMensagem(from, text) {
   conversas[from].push({ role: "user", content: text });
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
-  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
-  
-  // Claude extrai marca/modelo/ano de qualquer texto
-  const { marca, modelo, ano } = await extrairInfoVeiculoComClaude(todosTextos);
+  const todosTextos = conversas[from]
+    .filter(m => m.role === "user")
+    .map(m => m.content);
+
+  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextos);
   let fipeInfo = null;
 
   if (marca && modelo && ano) {
@@ -293,7 +288,11 @@ async function processarMensagem(from, text) {
 }
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
-app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
+app.get("/estoque", (req, res) => res.json({
+  total: estoqueAtual.length,
+  ultimaAtualizacao,
+  veiculos: estoqueAtual
+}));
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
@@ -320,19 +319,22 @@ app.post("/webhook", async (req, res) => {
 
     try {
       if (msg.type === "text") {
-        const text = msg.text.body;
-        console.log(`Texto de ${from}: ${text}`);
-        await processarMensagem(from, text);
+        console.log(`Texto de ${from}: ${msg.text.body}`);
+        await processarMensagem(from, msg.text.body);
       } else if (msg.type === "audio") {
         console.log(`Áudio de ${from} — transcrevendo...`);
         const texto = await transcreverAudio(msg.audio.id);
         if (texto) {
           console.log(`Transcrição: ${texto}`);
-          await processarMensagem(from, `[Áudio transcrito]: ${texto}`);
+          await processarMensagem(from, `[Áudio]: ${texto}`);
         } else {
           await axios.post(
             `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-            { messaging_product: "whatsapp", to: from, text: { body: "Oi! 😊 Não consegui entender o áudio. Pode digitar sua mensagem?" } },
+            {
+              messaging_product: "whatsapp",
+              to: from,
+              text: { body: "Não consegui entender o áudio. Pode digitar?" }
+            },
             { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
           );
         }
