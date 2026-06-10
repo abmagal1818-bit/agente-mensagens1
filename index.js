@@ -191,6 +191,65 @@ async function transcreverAudio(mediaId) {
   }
 }
 
+async function analisarImagem(mediaId, caption) {
+  try {
+    const mediaRes = await axios.get(
+      `https://graph.facebook.com/v25.0/${mediaId}`,
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    const imageUrl = mediaRes.data.url;
+
+    const imageRes = await axios.get(imageUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+      responseType: "arraybuffer"
+    });
+
+    const base64Image = Buffer.from(imageRes.data).toString("base64");
+    const mimeType = mediaRes.data.mime_type || "image/jpeg";
+
+    const res = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 300,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: mimeType,
+                data: base64Image
+              }
+            },
+            {
+              type: "text",
+              text: `Você é um avaliador de veículos experiente. Analise essa foto do carro e descreva brevemente:
+1. Estado geral visível (pintura, lataria, pneus se aparecer)
+2. Pontos positivos
+3. Pontos de atenção (se houver)
+Seja objetivo e use no máximo 3 linhas. ${caption ? `Contexto: ${caption}` : ""}`
+            }
+          ]
+        }]
+      },
+      {
+        headers: {
+          "x-api-key": CLAUDE_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        }
+      }
+    );
+
+    return res.data.content[0].text;
+  } catch (e) {
+    console.error("Erro análise imagem:", e.message);
+    return null;
+  }
+}
+
 const SYSTEM_PROMPT = (fipeInfo) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
 EMPRESA:
@@ -221,7 +280,11 @@ Pergunte de forma natural e amigável:
 - Já tem alguma avaliação prévia do carro?
 - Pode mandar algumas fotos pra gente ter uma ideia melhor? 📸
 
-ETAPA 2 — Só após receber informações suficientes:
+ETAPA 2 — Quando o cliente mandar fotos:
+Agradeça as fotos, comente algo positivo sobre o carro e continue coletando informações se necessário.
+Nunca ignore uma foto enviada — sempre acuse o recebimento e comente.
+
+ETAPA 3 — Só após ter km, estado geral e ao menos uma foto:
 ${fipeInfo ? (() => {
     const v = calcularValoresTroca(fipeInfo.Valor);
     return `✅ FIPE consultada (referência interna):
@@ -331,6 +394,7 @@ app.post("/webhook", async (req, res) => {
       if (msg.type === "text") {
         console.log(`Texto de ${from}: ${msg.text.body}`);
         await processarMensagem(from, msg.text.body);
+
       } else if (msg.type === "audio") {
         console.log(`Áudio de ${from} — transcrevendo...`);
         const texto = await transcreverAudio(msg.audio.id);
@@ -340,15 +404,23 @@ app.post("/webhook", async (req, res) => {
         } else {
           await axios.post(
             `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: "whatsapp",
-              to: from,
-              text: { body: "Não consegui entender o áudio. Pode digitar?" }
-            },
+            { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
             { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
           );
         }
+
+      } else if (msg.type === "image") {
+        console.log(`Imagem de ${from} — analisando...`);
+        const caption = msg.image.caption || "";
+        const analise = await analisarImagem(msg.image.id, caption);
+        if (analise) {
+          console.log(`Análise da imagem: ${analise}`);
+          await processarMensagem(from, `[Cliente enviou foto do veículo. Análise automática: ${analise}]`);
+        } else {
+          await processarMensagem(from, `[Cliente enviou uma foto do veículo${caption ? `: ${caption}` : ""}]`);
+        }
       }
+
     } catch (e) {
       console.error("Erro:", e.message);
       if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
