@@ -30,7 +30,7 @@ function extrairInfoVeiculo(textos) {
     "yaris": "toyota", "corolla": "toyota", "hilux": "toyota", "sw4": "toyota", "etios": "toyota", "rav4": "toyota",
     "renegade": "jeep", "compass": "jeep", "commander": "jeep", "wrangler": "jeep",
     "jetta": "volkswagen", "polo": "volkswagen", "gol": "volkswagen", "virtus": "volkswagen", "tcross": "volkswagen", "t-cross": "volkswagen", "tiguan": "volkswagen", "amarok": "volkswagen", "saveiro": "volkswagen",
-    "civic": "honda", "hrv": "honda", "crv": "honda", "fit": "honda", "city": "honda", "wrv": "honda", "wr-v": "honda",
+    "civic": "honda", "hrv": "honda", "crv": "honda", "fit": "honda", "city": "honda", "wrv": "honda",
     "onix": "chevrolet", "cruze": "chevrolet", "tracker": "chevrolet", "s10": "chevrolet", "spin": "chevrolet", "cobalt": "chevrolet",
     "ka": "ford", "ecosport": "ford", "ranger": "ford", "bronco": "ford", "territory": "ford",
     "hb20": "hyundai", "creta": "hyundai", "tucson": "hyundai", "ix35": "hyundai",
@@ -76,9 +76,69 @@ function extrairInfoVeiculo(textos) {
   return { marca: marcaDetectada, modelo: modeloDetectado, ano };
 }
 
+async function encontrarCodigoFipe(marcaCodigo, nomeModelo, ano) {
+  try {
+    // Busca todos os modelos da marca
+    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos`);
+    const todosModelos = modelosRes.data.modelos;
+
+    // Usa o Claude para identificar o modelo correto na lista
+    const listaModelos = todosModelos.map(m => `${m.codigo}: ${m.nome}`).join("\n");
+    const claudeRes = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        messages: [{
+          role: "user",
+          content: `Da lista abaixo, qual é o código do modelo mais parecido com "${nomeModelo} ${ano}"? 
+Responda APENAS com o número do código, sem mais nada.
+
+${listaModelos}`
+        }]
+      },
+      {
+        headers: {
+          "x-api-key": CLAUDE_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        }
+      }
+    );
+
+    const codigoModelo = claudeRes.data.content[0].text.trim();
+    console.log(`Claude selecionou código: ${codigoModelo}`);
+
+    // Busca anos disponíveis para esse modelo
+    const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos`);
+    
+    // Tenta encontrar o ano exato
+    let anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
+    
+    // Se não achar, pega o mais próximo
+    if (!anoEncontrado) {
+      const anosDisponiveis = anosRes.data.filter(a => !a.nome.includes("32000"));
+      anoEncontrado = anosDisponiveis[0];
+      console.log(`Ano ${ano} não encontrado, usando: ${anoEncontrado?.nome}`);
+    }
+
+    if (!anoEncontrado) return null;
+
+    const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaCodigo}/modelos/${codigoModelo}/anos/${anoEncontrado.codigo}`);
+    return valorRes.data;
+
+  } catch (e) {
+    console.error("Erro encontrarCodigoFipe:", e.message);
+    return null;
+  }
+}
+
 async function consultarFipe(marca, modelo, ano) {
   const chave = `${marca}-${modelo}-${ano}`.toLowerCase();
-  if (fipeCache[chave]) return fipeCache[chave];
+  if (fipeCache[chave]) {
+    console.log(`FIPE do cache: ${fipeCache[chave].Valor}`);
+    return fipeCache[chave];
+  }
 
   try {
     const marcasRes = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
@@ -91,35 +151,14 @@ async function consultarFipe(marca, modelo, ano) {
     }
     console.log(`Marca encontrada: ${marcaEncontrada.nome} (${marcaEncontrada.codigo})`);
 
-    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos`);
-
-    const primeiraWord = modelo.toLowerCase().split(" ")[0];
-    const modelosFiltrados = modelosRes.data.modelos.filter(m =>
-      m.nome.toLowerCase().includes(primeiraWord)
-    );
-    console.log(`Modelos encontrados para "${primeiraWord}": ${modelosFiltrados.length}`);
-
-    if (modelosFiltrados.length === 0) {
-      console.log("Nenhum modelo encontrado!");
-      return null;
+    const resultado = await encontrarCodigoFipe(marcaEncontrada.codigo, modelo, ano);
+    
+    if (resultado) {
+      fipeCache[chave] = resultado;
+      console.log(`✅ FIPE encontrada: ${resultado.Modelo} = ${resultado.Valor}`);
     }
-
-    const modeloEncontrado = modelosFiltrados[0];
-    console.log(`Modelo selecionado: ${modeloEncontrado.nome}`);
-
-    const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos`);
-    const anoEncontrado = anosRes.data.find(a => a.nome.includes(ano.toString()));
-
-    if (!anoEncontrado) {
-      console.log(`Ano ${ano} não encontrado. Anos disponíveis:`, anosRes.data.map(a => a.nome).join(", "));
-      return null;
-    }
-    console.log(`Ano encontrado: ${anoEncontrado.nome}`);
-
-    const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaEncontrada.codigo}/modelos/${modeloEncontrado.codigo}/anos/${anoEncontrado.codigo}`);
-    fipeCache[chave] = valorRes.data;
-    console.log(`✅ FIPE encontrada: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
-    return valorRes.data;
+    
+    return resultado;
   } catch (e) {
     console.error("Erro FIPE:", e.message);
     return null;
@@ -190,15 +229,16 @@ PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Ca
 
 AVALIAÇÃO DE TROCA:
 ${fipeInfo ?
-    `✅ FIPE OFICIAL (${fipeInfo.MesReferencia}):
+    `✅ FIPE OFICIAL CONSULTADA (${fipeInfo.MesReferencia}):
 Modelo: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo}
 FIPE: ${fipeInfo.Valor}
-Valor de troca (20% abaixo): R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}
-⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO inventar outros valores.` :
-    `⚠️ NUNCA invente valores de FIPE. Se não tiver FIPE consultada, diga:
+Valor de troca (20% abaixo da FIPE): R$ ${calcularValorTroca(fipeInfo.Valor).trocaFormatado}
+⚠️ USE EXATAMENTE ESSES VALORES. PROIBIDO usar outros valores.` :
+    `⚠️ NUNCA invente valores de FIPE.
+Se não tiver FIPE consultada, diga APENAS:
 "Me informa a marca, modelo e ano do seu veículo para eu consultar a FIPE!"`
   }
-Desconto de 20% é padrão de mercado RS. Avaliação final é sempre presencial.
+Desconto de 20% é padrão de mercado RS. Avaliação final sempre presencial.
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
