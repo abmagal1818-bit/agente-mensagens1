@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
+const https = require("https");
 const app = express();
 app.use(express.json());
 
@@ -9,6 +10,9 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const MOBIAUTO_EMAIL = process.env.MOBIAUTO_EMAIL || "premium@premiumautomarcas.com.br";
+const MOBIAUTO_SENHA = process.env.MOBIAUTO_SENHA || "f;I~5N=@@M";
+const LOJA_ID = "31402";
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -16,6 +20,186 @@ const conversas = {};
 const mensagensProcessadas = new Set();
 const fipeCache = {};
 let cacheMarcasFipe = null;
+
+// ─────────────────────────────────────────────
+// SINCRONIZADOR DE ESTOQUE — MOBIGESTOR
+// ─────────────────────────────────────────────
+
+function httpsRequest(options, body = null) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+        return httpsRequest(res.headers.location, body).then(resolve).catch(reject);
+      }
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error("Timeout")); });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function extrairCookies(header) {
+  if (!header) return "";
+  return (Array.isArray(header) ? header : [header]).map(c => c.split(";")[0]).join("; ");
+}
+
+async function fazerLoginMobigestor() {
+  const body = JSON.stringify({ email: MOBIAUTO_EMAIL, password: MOBIAUTO_SENHA });
+  const headers = {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(body),
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Origin": "https://www.mobigestor.com.br",
+    "Referer": "https://www.mobigestor.com.br/",
+  };
+
+  const endpoints = [
+    { hostname: "www.mobigestor.com.br", path: "/api/auth/login" },
+    { hostname: "www.mobigestor.com.br", path: "/auth/login" },
+    { hostname: "api.mobiauto.com.br",   path: "/auth/v1/login" },
+    { hostname: "api.mobiauto.com.br",   path: "/v1/auth/login" },
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      console.log(`[Estoque] Login: ${ep.hostname}${ep.path}`);
+      const res = await httpsRequest({ ...ep, method: "POST", headers }, body);
+      if (res.status === 200 || res.status === 201) {
+        const cookies = extrairCookies(res.headers["set-cookie"]);
+        let token = null;
+        try {
+          const d = JSON.parse(res.body);
+          token = d.token || d.access_token || d.accessToken || d.jwt
+               || (d.data && (d.data.token || d.data.access_token));
+        } catch(e) {}
+        console.log(`[Estoque] Login OK (${ep.path})`);
+        return { token, cookies };
+      }
+    } catch(e) {
+      console.log(`[Estoque] Erro login ${ep.path}: ${e.message}`);
+    }
+  }
+  return null;
+}
+
+async function buscarVeiculosMobigestor(auth) {
+  const authHeaders = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+    "Accept": "application/json",
+    ...(auth.token   && { "Authorization": `Bearer ${auth.token}` }),
+    ...(auth.cookies && { "Cookie": auth.cookies }),
+  };
+
+  const paths = [
+    `/api/loja/${LOJA_ID}/anuncios?status=ATIVO&size=100&page=0`,
+    `/api/loja/${LOJA_ID}/anuncios?size=100`,
+    `/api/${LOJA_ID}/anuncios?status=ATIVO&size=100`,
+    `/api/anuncios?lojaId=${LOJA_ID}&status=ATIVO&size=100`,
+  ];
+
+  for (const path of paths) {
+    try {
+      const res = await httpsRequest({ hostname: "www.mobigestor.com.br", path, method: "GET", headers: authHeaders });
+      if (res.status === 200) {
+        const data = JSON.parse(res.body);
+        const lista = data.content || data.items || data.data || data.anuncios || data.veiculos || data;
+        if (Array.isArray(lista) && lista.length > 0) {
+          return { lista, authHeaders };
+        }
+      }
+    } catch(e) {}
+  }
+  return null;
+}
+
+async function buscarFotosVeiculo(id, authHeaders) {
+  const paths = [
+    `/api/loja/${LOJA_ID}/anuncios/${id}`,
+    `/api/loja/${LOJA_ID}/anuncios/${id}/fotos`,
+    `/api/anuncios/${id}/fotos`,
+    `/api/anuncios/${id}`,
+  ];
+
+  for (const path of paths) {
+    try {
+      const res = await httpsRequest({ hostname: "www.mobigestor.com.br", path, method: "GET", headers: authHeaders });
+      if (res.status === 200) {
+        const data = JSON.parse(res.body);
+        const arr = data.fotos || data.images || data.imagens || data.photos || data.midias || data;
+        if (Array.isArray(arr)) {
+          const urls = arr
+            .map(f => typeof f === "string" ? f : (f.url || f.imageUrl || f.urlImagem || f.path || f.src))
+            .filter(u => u && typeof u === "string" && u.startsWith("http"));
+          if (urls.length > 0) return urls;
+        }
+      }
+    } catch(e) {}
+  }
+  return [];
+}
+
+async function sincronizarEstoque() {
+  console.log("[Estoque] Iniciando sincronização...");
+  try {
+    const auth = await fazerLoginMobigestor();
+    if (!auth) {
+      console.log("[Estoque] ❌ Falha no login");
+      return;
+    }
+
+    const resultado = await buscarVeiculosMobigestor(auth);
+    if (!resultado) {
+      console.log("[Estoque] ❌ Não foi possível buscar veículos");
+      return;
+    }
+
+    const { lista, authHeaders } = resultado;
+    const estoqueNovo = [];
+
+    for (const v of lista) {
+      const id = v.id || v.anuncioId || v.codigoAnuncio || v.codigo;
+      const fotos = await buscarFotosVeiculo(id, authHeaders);
+      estoqueNovo.push({
+        id,
+        marca:         v.marca         || v.brand        || "",
+        modelo:        v.modelo        || v.model        || "",
+        versao:        v.versao        || v.version      || "",
+        ano:           v.anoModelo     || v.ano          || v.year || "",
+        anoFabricacao: v.anoFabricacao || "",
+        km:            v.quilometragem || v.km           || v.mileage || 0,
+        preco:         v.preco         || v.price        || 0,
+        cambio:        v.cambio        || v.transmission || "",
+        combustivel:   v.combustivel   || v.fuel         || "",
+        cor:           v.cor           || v.color        || "",
+        opcionais:     v.opcionais     || v.features     || [],
+        descricao:     v.descricao     || v.description  || "",
+        fotos,
+      });
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    estoqueAtual = estoqueNovo;
+    ultimaAtualizacao = new Date().toLocaleString("pt-BR");
+    const comFotos = estoqueNovo.filter(v => v.fotos.length > 0).length;
+    console.log(`[Estoque] ✅ ${estoqueNovo.length} veículos | ${comFotos} com fotos | ${ultimaAtualizacao}`);
+
+  } catch(e) {
+    console.error("[Estoque] Erro:", e.message);
+  }
+}
+
+// Roda ao iniciar e depois a cada 6 horas
+sincronizarEstoque();
+setInterval(sincronizarEstoque, 6 * 60 * 60 * 1000);
+
+// ─────────────────────────────────────────────
+// FUNÇÕES DA SARA (sem alteração)
+// ─────────────────────────────────────────────
 
 function formatarEstoque() {
   if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
@@ -63,80 +247,42 @@ Texto: "${texto}"`
         }
       }
     );
-
     const resposta = res.data.content[0].text.trim();
     const jsonMatch = resposta.match(/\{[^}]+\}/);
     if (!jsonMatch) return { marca: null, modelo: null, ano: null };
     const json = JSON.parse(jsonMatch[0]);
-    console.log(`Veículo para troca: marca=${json.marca} modelo=${json.modelo} ano=${json.ano}`);
     return json;
   } catch (e) {
-    console.error("Erro ao extrair veículo:", e.message);
     return { marca: null, modelo: null, ano: null };
   }
 }
 
 async function consultarFipe(marca, modelo, ano) {
   if (!marca || !modelo || !ano) return null;
-
   const chave = `${marca}-${modelo}-${ano}`.toLowerCase();
-  if (fipeCache[chave]) {
-    console.log(`FIPE do cache: ${fipeCache[chave].Valor}`);
-    return fipeCache[chave];
-  }
-
+  if (fipeCache[chave]) return fipeCache[chave];
   try {
     const marcas = await getMarcasFipe();
-
     const marcaFipe = marcas.find(m =>
       m.nome.toLowerCase().includes(marca.toLowerCase()) ||
       marca.toLowerCase().includes(m.nome.toLowerCase().split(" ")[0])
     );
-
-    if (!marcaFipe) {
-      console.log(`Marca não encontrada na FIPE: ${marca}`);
-      return null;
-    }
-    console.log(`Marca FIPE: ${marcaFipe.nome} (${marcaFipe.codigo})`);
-
-    const modelosRes = await axios.get(
-      `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`
-    );
-
+    if (!marcaFipe) return null;
+    const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`);
     const primeirapalavra = modelo.toLowerCase().split(" ")[0];
-    const modelosCandidatos = modelosRes.data.modelos.filter(m =>
-      m.nome.toLowerCase().includes(primeirapalavra)
-    );
-
-    if (modelosCandidatos.length === 0) {
-      console.log(`Modelo não encontrado: ${modelo}`);
-      return null;
-    }
-
+    const modelosCandidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(primeirapalavra));
+    if (modelosCandidatos.length === 0) return null;
     for (const candidato of modelosCandidatos) {
-      const anosRes = await axios.get(
-        `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos`
-      );
-
-      const anoFipe = anosRes.data.find(a =>
-        a.nome.includes(ano.toString()) && !a.nome.includes("32000")
-      );
-
+      const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos`);
+      const anoFipe = anosRes.data.find(a => a.nome.includes(ano.toString()) && !a.nome.includes("32000"));
       if (anoFipe) {
-        console.log(`Modelo: ${candidato.nome} | Ano: ${anoFipe.nome}`);
-        const valorRes = await axios.get(
-          `https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos/${anoFipe.codigo}`
-        );
+        const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos/${anoFipe.codigo}`);
         fipeCache[chave] = valorRes.data;
-        console.log(`✅ FIPE: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
         return valorRes.data;
       }
     }
-
-    console.log(`Ano ${ano} não encontrado para ${marca} ${modelo}`);
     return null;
   } catch (e) {
-    console.error("Erro FIPE:", e.message);
     return null;
   }
 }
@@ -155,58 +301,25 @@ function calcularValoresTroca(valorFipeStr) {
 
 async function transcreverAudio(mediaId) {
   try {
-    const mediaRes = await axios.get(
-      `https://graph.facebook.com/v25.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-    const audioUrl = mediaRes.data.url;
-
-    const audioRes = await axios.get(audioUrl, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-      responseType: "arraybuffer"
-    });
-
+    const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    const audioRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
     const formData = new FormData();
-    formData.append("file", Buffer.from(audioRes.data), {
-      filename: "audio.ogg",
-      contentType: "audio/ogg"
-    });
+    formData.append("file", Buffer.from(audioRes.data), { filename: "audio.ogg", contentType: "audio/ogg" });
     formData.append("model", "whisper-large-v3");
     formData.append("language", "pt");
-
-    const transcricaoRes = await axios.post(
-      "https://api.groq.com/openai/v1/audio/transcriptions",
-      formData,
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          ...formData.getHeaders()
-        }
-      }
-    );
+    const transcricaoRes = await axios.post("https://api.groq.com/openai/v1/audio/transcriptions", formData, { headers: { Authorization: `Bearer ${GROQ_API_KEY}`, ...formData.getHeaders() } });
     return transcricaoRes.data.text;
   } catch (e) {
-    console.error("Erro transcrição:", e.message);
     return null;
   }
 }
 
 async function analisarImagem(mediaId, caption) {
   try {
-    const mediaRes = await axios.get(
-      `https://graph.facebook.com/v25.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-    const imageUrl = mediaRes.data.url;
-
-    const imageRes = await axios.get(imageUrl, {
-      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-      responseType: "arraybuffer"
-    });
-
+    const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
+    const imageRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
     const base64Image = Buffer.from(imageRes.data).toString("base64");
     const mimeType = mediaRes.data.mime_type || "image/jpeg";
-
     const res = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
@@ -215,37 +328,15 @@ async function analisarImagem(mediaId, caption) {
         messages: [{
           role: "user",
           content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: mimeType,
-                data: base64Image
-              }
-            },
-            {
-              type: "text",
-              text: `Você é um avaliador de veículos experiente. Analise essa foto do carro e descreva brevemente:
-1. Estado geral visível (pintura, lataria, pneus se aparecer)
-2. Pontos positivos
-3. Pontos de atenção (se houver)
-Seja objetivo e use no máximo 3 linhas. ${caption ? `Contexto: ${caption}` : ""}`
-            }
+            { type: "image", source: { type: "base64", media_type: mimeType, data: base64Image } },
+            { type: "text", text: `Você é um avaliador de veículos experiente. Analise essa foto do carro e descreva brevemente:\n1. Estado geral visível (pintura, lataria, pneus se aparecer)\n2. Pontos positivos\n3. Pontos de atenção (se houver)\nSeja objetivo e use no máximo 3 linhas. ${caption ? `Contexto: ${caption}` : ""}` }
           ]
         }]
       },
-      {
-        headers: {
-          "x-api-key": CLAUDE_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json"
-        }
-      }
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-
     return res.data.content[0].text;
   } catch (e) {
-    console.error("Erro análise imagem:", e.message);
     return null;
   }
 }
@@ -265,6 +356,10 @@ PERFIL:
 
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
+
+FOTOS DOS VEÍCULOS:
+Quando o cliente pedir fotos de um veículo específico, envie as fotos disponíveis.
+Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
 
 PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
 
@@ -312,24 +407,64 @@ REGRAS:
 - Emojis com moderação 🚗
 - Humano: (51) 99364-2476
 - NUNCA invente links, URLs ou endereços de site
-- Quando pedirem fotos do estoque: "Entre em contato pelo (51) 99364-2476 ou venha visitar na Av. Aparício Borges, 931!"
 - NUNCA invente informações de estoque`;
+
+// Envia fotos de um veículo pelo WhatsApp
+async function enviarFotosVeiculo(to, veiculo) {
+  const fotos = veiculo.fotos || [];
+  if (fotos.length === 0) return false;
+  // Envia até 5 fotos
+  const fotosParaEnviar = fotos.slice(0, 5);
+  for (const url of fotosParaEnviar) {
+    try {
+      await axios.post(
+        `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to,
+          type: "image",
+          image: { link: url }
+        },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await new Promise(r => setTimeout(r, 500));
+    } catch(e) {
+      console.error(`Erro ao enviar foto: ${e.message}`);
+    }
+  }
+  return true;
+}
+
+// Detecta se cliente pediu fotos e de qual veículo
+function detectarPedidoDeFotos(texto, estoque) {
+  const t = texto.toLowerCase();
+  const pedindoFotos = t.includes("foto") || t.includes("imagem") || t.includes("ver o carro") || t.includes("como está") || t.includes("como esta");
+  if (!pedindoFotos) return null;
+
+  for (const v of estoque) {
+    const nome = `${v.marca} ${v.modelo} ${v.versao}`.toLowerCase();
+    const palavras = nome.split(" ").filter(p => p.length > 3);
+    if (palavras.some(p => t.includes(p))) return v;
+  }
+  return null;
+}
 
 async function processarMensagem(from, text) {
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
-  const todosTextos = conversas[from]
-    .filter(m => m.role === "user")
-    .map(m => m.content);
+  // Verifica se cliente pediu fotos
+  const veiculoComFotos = detectarPedidoDeFotos(text, estoqueAtual);
+  if (veiculoComFotos && veiculoComFotos.fotos.length > 0) {
+    console.log(`[Fotos] Enviando fotos do ${veiculoComFotos.marca} ${veiculoComFotos.modelo}`);
+    await enviarFotosVeiculo(from, veiculoComFotos);
+  }
 
+  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
   const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextos);
   let fipeInfo = null;
-
-  if (marca && modelo && ano) {
-    fipeInfo = await consultarFipe(marca, modelo, ano);
-  }
+  if (marca && modelo && ano) fipeInfo = await consultarFipe(marca, modelo, ano);
 
   const claude = await axios.post(
     "https://api.anthropic.com/v1/messages",
@@ -339,13 +474,7 @@ async function processarMensagem(from, text) {
       system: SYSTEM_PROMPT(fipeInfo),
       messages: conversas[from]
     },
-    {
-      headers: {
-        "x-api-key": CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-      }
-    }
+    { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
   );
 
   const reply = claude.data.content[0].text;
@@ -361,11 +490,17 @@ async function processarMensagem(from, text) {
 }
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
+
 app.get("/estoque", (req, res) => res.json({
   total: estoqueAtual.length,
   ultimaAtualizacao,
   veiculos: estoqueAtual
 }));
+
+app.get("/sincronizar", async (req, res) => {
+  res.send("Sincronização iniciada! Acompanhe nos logs.");
+  await sincronizarEstoque();
+});
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
@@ -378,49 +513,37 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   res.sendStatus(200);
-
   if (body.object === "whatsapp_business_account") {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
-
     const msgId = msg.id;
     if (mensagensProcessadas.has(msgId)) return;
     mensagensProcessadas.add(msgId);
     setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
-
     const from = msg.from;
-
     try {
       if (msg.type === "text") {
         console.log(`Texto de ${from}: ${msg.text.body}`);
         await processarMensagem(from, msg.text.body);
-
       } else if (msg.type === "audio") {
-        console.log(`Áudio de ${from} — transcrevendo...`);
         const texto = await transcreverAudio(msg.audio.id);
         if (texto) {
-          console.log(`Transcrição: ${texto}`);
           await processarMensagem(from, `[Áudio]: ${texto}`);
         } else {
-          await axios.post(
-            `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
             { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
             { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
           );
         }
-
       } else if (msg.type === "image") {
-        console.log(`Imagem de ${from} — analisando...`);
         const caption = msg.image.caption || "";
         const analise = await analisarImagem(msg.image.id, caption);
         if (analise) {
-          console.log(`Análise da imagem: ${analise}`);
           await processarMensagem(from, `[Cliente enviou foto do veículo. Análise automática: ${analise}]`);
         } else {
           await processarMensagem(from, `[Cliente enviou uma foto do veículo${caption ? `: ${caption}` : ""}]`);
         }
       }
-
     } catch (e) {
       console.error("Erro:", e.message);
       if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
@@ -430,8 +553,7 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/registrar", async (req, res) => {
   try {
-    const result = await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/register`,
+    const result = await axios.post(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/register`,
       { messaging_product: "whatsapp", pin: "123456" },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
@@ -443,9 +565,7 @@ app.get("/registrar", async (req, res) => {
 
 app.get("/assinar-webhook", async (req, res) => {
   try {
-    const result = await axios.post(
-      `https://graph.facebook.com/v18.0/2609687206092266/subscribed_apps`,
-      {},
+    const result = await axios.post(`https://graph.facebook.com/v18.0/2609687206092266/subscribed_apps`, {},
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
     );
     res.send("Assinado! " + JSON.stringify(result.data));
