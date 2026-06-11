@@ -99,30 +99,35 @@ async function buscarVeiculosMobigestor(auth) {
   };
 
   const paths = [
-    `/api/loja/${LOJA_ID}/anuncios?status=ATIVO&size=100&page=0`,
-    `/api/loja/${LOJA_ID}/anuncios?size=100`,
-    `/api/loja/${LOJA_ID}/veiculos?size=100`,
-    `/api/loja/${LOJA_ID}/estoque?size=100`,
-    `/mobigestor/${LOJA_ID}/estoque/api?size=100`,
-    `/api/anuncios?lojaId=${LOJA_ID}&size=100`,
-    `/api/v1/loja/${LOJA_ID}/anuncios?size=100`,
+    { host: "api.mobiauto.com.br",   path: `/revendas/${LOJA_ID}/anuncios?status=ATIVO&size=100` },
+    { host: "api.mobiauto.com.br",   path: `/revendas/${LOJA_ID}/anuncios?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/revendas/${LOJA_ID}/veiculos?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/v1/revendas/${LOJA_ID}/anuncios?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/v2/revendas/${LOJA_ID}/anuncios?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/lojas/${LOJA_ID}/anuncios?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/v1/lojas/${LOJA_ID}/anuncios?size=100` },
+    { host: "api.mobiauto.com.br",   path: `/anuncios?revendaId=${LOJA_ID}&size=100` },
+    { host: "api.mobiauto.com.br",   path: `/v1/anuncios?revendaId=${LOJA_ID}&size=100` },
+    { host: "api.mobiauto.com.br",   path: `/estoque?lojaId=${LOJA_ID}&size=100` },
+    { host: "www.mobigestor.com.br", path: `/api/loja/${LOJA_ID}/anuncios?status=ATIVO&size=100` },
   ];
 
   for (const path of paths) {
     try {
-      console.log(`[Estoque] Tentando: ${path}`);
-      const host = path.startsWith("/api/loja") ? "api.mobiauto.com.br" : "www.mobigestor.com.br";
-      const res = await httpsRequest({ hostname: host, path, method: "GET", headers: authHeaders });
-      console.log(`[Estoque] Status: ${res.status} | Host: ${host} | Resposta: ${res.body.substring(0, 200)}`);
+      console.log(`[Estoque] Tentando: ${ep.host}${ep.path}`);
+      const res = await httpsRequest({ hostname: ep.host, path: ep.path, method: "GET", headers: authHeaders });
+      console.log(`[Estoque] Status: ${res.status} | ${ep.host}${ep.path.substring(0,50)} | ${res.body.substring(0, 150)}`);
       if (res.status === 200) {
-        const data = JSON.parse(res.body);
+        let data;
+        try { data = JSON.parse(res.body); } catch(e) { continue; }
         const lista = data.content || data.items || data.data || data.anuncios || data.veiculos || data;
         if (Array.isArray(lista) && lista.length > 0) {
+          console.log(`[Estoque] ✅ ${lista.length} veículos encontrados!`);
           return { lista, authHeaders };
         }
       }
     } catch(e) {
-      console.log(`[Estoque] Erro ${path}: ${e.message}`);
+      console.log(`[Estoque] Erro ${ep.host}${ep.path}: ${e.message}`);
     }
   }
   return null;
