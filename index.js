@@ -59,10 +59,13 @@ async function fazerLoginMobigestor() {
   };
 
   const endpoints = [
-    { hostname: "www.mobigestor.com.br", path: "/api/auth/login" },
-    { hostname: "www.mobigestor.com.br", path: "/auth/login" },
+    { hostname: "auth.mobiauto.com.br",  path: "/auth/login" },
+    { hostname: "auth.mobiauto.com.br",  path: "/v1/auth/login" },
+    { hostname: "auth.mobiauto.com.br",  path: "/api/auth/login" },
+    { hostname: "auth.mobiauto.com.br",  path: "/login" },
+    { hostname: "api.mobiauto.com.br",   path: "/auth/login" },
     { hostname: "api.mobiauto.com.br",   path: "/auth/v1/login" },
-    { hostname: "api.mobiauto.com.br",   path: "/v1/auth/login" },
+    { hostname: "www.mobigestor.com.br", path: "/api/auth/login" },
   ];
 
   for (const ep of endpoints) {
@@ -108,8 +111,9 @@ async function buscarVeiculosMobigestor(auth) {
   for (const path of paths) {
     try {
       console.log(`[Estoque] Tentando: ${path}`);
-      const res = await httpsRequest({ hostname: "www.mobigestor.com.br", path, method: "GET", headers: authHeaders });
-      console.log(`[Estoque] Status: ${res.status} | Resposta: ${res.body.substring(0, 200)}`);
+      const host = path.startsWith("/api/loja") ? "api.mobiauto.com.br" : "www.mobigestor.com.br";
+      const res = await httpsRequest({ hostname: host, path, method: "GET", headers: authHeaders });
+      console.log(`[Estoque] Status: ${res.status} | Host: ${host} | Resposta: ${res.body.substring(0, 200)}`);
       if (res.status === 200) {
         const data = JSON.parse(res.body);
         const lista = data.content || data.items || data.data || data.anuncios || data.veiculos || data;
