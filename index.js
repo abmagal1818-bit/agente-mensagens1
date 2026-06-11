@@ -47,7 +47,42 @@ function extrairCookies(header) {
   return (Array.isArray(header) ? header : [header]).map(c => c.split(";")[0]).join("; ");
 }
 
-async function fazerLoginMobigestor() {
+async function buscarVeiculosMobigestor(auth) {
+  const authHeaders = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
+    "Accept": "application/json",
+    ...(auth.token   && { "Authorization": `Bearer ${auth.token}` }),
+    ...(auth.cookies && { "Cookie": auth.cookies }),
+  };
+
+  const paths = [
+    `/api/loja/${LOJA_ID}/anuncios?status=ATIVO&size=100&page=0`,
+    `/api/loja/${LOJA_ID}/anuncios?size=100`,
+    `/api/loja/${LOJA_ID}/veiculos?size=100`,
+    `/api/loja/${LOJA_ID}/estoque?size=100`,
+    `/mobigestor/${LOJA_ID}/estoque/api?size=100`,
+    `/api/anuncios?lojaId=${LOJA_ID}&size=100`,
+    `/api/v1/loja/${LOJA_ID}/anuncios?size=100`,
+  ];
+
+  for (const path of paths) {
+    try {
+      console.log(`[Estoque] Tentando: ${path}`);
+      const res = await httpsRequest({ hostname: "www.mobigestor.com.br", path, method: "GET", headers: authHeaders });
+      console.log(`[Estoque] Status: ${res.status} | Resposta: ${res.body.substring(0, 200)}`);
+      if (res.status === 200) {
+        const data = JSON.parse(res.body);
+        const lista = data.content || data.items || data.data || data.anuncios || data.veiculos || data;
+        if (Array.isArray(lista) && lista.length > 0) {
+          return { lista, authHeaders };
+        }
+      }
+    } catch(e) {
+      console.log(`[Estoque] Erro ${path}: ${e.message}`);
+    }
+  }
+  return null;
+}
   const body = JSON.stringify({ email: MOBIAUTO_EMAIL, password: MOBIAUTO_SENHA });
   const headers = {
     "Content-Type": "application/json",
