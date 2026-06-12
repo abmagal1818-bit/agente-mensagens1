@@ -2,7 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
 const https = require("https");
-const app = express();
+const app = express()
 app.use(express.json());
 
 const VERIFY_TOKEN = "meu_token_verificacao";
@@ -80,7 +80,9 @@ async function fazerLoginMobigestor() {
           token = d.token || d.access_token || d.accessToken || d.jwt
                || (d.data && (d.data.token || d.data.access_token));
         } catch(e) {}
-        console.log(`[Estoque] Login OK (${ep.path})`);
+        console.log(`[Estoque] Login OK (${ep.hostname}${ep.path})`);
+        console.log(`[Estoque] Resposta: ${res.body.substring(0, 500)}`);
+        console.log(`[Estoque] Token: ${token ? token.substring(0,80) : "NÃO ENCONTRADO"}`);
         return { token, cookies };
       }
     } catch(e) {
