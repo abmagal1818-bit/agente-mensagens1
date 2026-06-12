@@ -112,7 +112,7 @@ async function buscarVeiculosMobigestor(auth) {
     { host: "www.mobigestor.com.br", path: `/api/loja/${LOJA_ID}/anuncios?status=ATIVO&size=100` },
   ];
 
-  for (const path of paths) {
+  for (const ep of paths) {
     try {
       console.log(`[Estoque] Tentando: ${ep.host}${ep.path}`);
       const res = await httpsRequest({ hostname: ep.host, path: ep.path, method: "GET", headers: authHeaders });
