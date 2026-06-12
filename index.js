@@ -510,17 +510,42 @@ async function enviarFotosVeiculo(to, veiculo) {
 }
 
 // Detecta se cliente pediu fotos e de qual veículo
-function detectarPedidoDeFotos(texto, estoque) {
+function detectarPedidoDeFotos(texto, estoque, historicoConversa) {
   const t = texto.toLowerCase();
-  const pedindoFotos = t.includes("foto") || t.includes("imagem") || t.includes("ver o carro") || t.includes("como está") || t.includes("como esta");
+  const pedindoFotos = t.includes("foto") || t.includes("imagem") || t.includes("ver o carro") || t.includes("tem foto") || t.includes("manda foto") || t.includes("mandar foto");
   if (!pedindoFotos) return null;
 
+  // Junta texto atual + últimas mensagens para contexto
+  const contexto = [texto, ...(historicoConversa || [])
+    .filter(m => m.role === "user")
+    .slice(-5)
+    .map(m => m.content)
+  ].join(" ").toLowerCase();
+
+  // Tenta achar o veículo mencionado no contexto da conversa
+  let melhorMatch = null;
+  let melhorScore = 0;
+
   for (const v of estoque) {
-    const nome = `${v.marca} ${v.modelo} ${v.versao}`.toLowerCase();
-    const palavras = nome.split(" ").filter(p => p.length > 3);
-    if (palavras.some(p => t.includes(p))) return v;
+    const modelo = limparTexto(v.modelo || "").toLowerCase();
+    const palavras = modelo.split(" ").filter(p => p.length > 2);
+    let score = 0;
+
+    for (const p of palavras) {
+      if (contexto.includes(p)) score++;
+    }
+
+    // Bonus se o ano também bate
+    if (v.ano && contexto.includes(String(v.ano))) score += 2;
+
+    if (score > melhorScore) {
+      melhorScore = score;
+      melhorMatch = v;
+    }
   }
-  return null;
+
+  // Só retorna se encontrou pelo menos 1 palavra matching
+  return melhorScore > 0 ? melhorMatch : null;
 }
 
 async function processarMensagem(from, text) {
@@ -529,7 +554,7 @@ async function processarMensagem(from, text) {
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   // Verifica se cliente pediu fotos
-  const veiculoComFotos = detectarPedidoDeFotos(text, estoqueAtual);
+  const veiculoComFotos = detectarPedidoDeFotos(text, estoqueAtual, conversas[from]);
   if (veiculoComFotos && veiculoComFotos.fotos.length > 0) {
     console.log(`[Fotos] Enviando fotos do ${veiculoComFotos.marca} ${veiculoComFotos.modelo}`);
     await enviarFotosVeiculo(from, veiculoComFotos);
