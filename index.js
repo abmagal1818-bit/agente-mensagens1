@@ -260,11 +260,26 @@ setInterval(sincronizarEstoque, 6 * 60 * 60 * 1000);
 // FUNÇÕES DA SARA (sem alteração)
 // ─────────────────────────────────────────────
 
+function limparTexto(str) {
+  if (!str) return "";
+  // Remove surrogate pairs e emojis que quebram JSON
+  return String(str)
+    .replace(/[\uD800-\uDFFF]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+    .replace(/[\u{2600}-\u{27BF}]/gu, "")
+    .replace(/[\u{FE00}-\u{FEFF}]/gu, "")
+    .trim();
+}
+
 function formatarEstoque() {
   if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
-  return estoqueAtual.map(v =>
-    `${v.marca} ${v.modelo} ${v.versao} ${v.ano} - ${v.km.toLocaleString("pt-BR")} km - R$ ${v.preco.toLocaleString("pt-BR")} - ${v.cor} - ${v.cambio}`
-  ).join("\n");
+  return estoqueAtual.map(v => {
+    const modelo = limparTexto(v.modelo || "");
+    const ano = v.ano || "";
+    const km = Number(v.km || 0).toLocaleString("pt-BR");
+    const preco = Number(v.preco || 0).toLocaleString("pt-BR");
+    return `${modelo} ${ano} - ${km} km - R$ ${preco}`;
+  }).join("\n");
 }
 
 async function getMarcasFipe() {
