@@ -167,6 +167,11 @@ async function buscarFotosVeiculo(id, authHeaders) {
 // SINCRONIZADOR VIA INSTAGRAM
 // ─────────────────────────────────────────────
 
+function limparTexto(str) {
+  if (!str) return "";
+  return str.replace(/[\uD800-\uDFFF]/g, "").replace(/[\u{1F000}-\u{1FFFF}]/gu, "").trim();
+}
+
 async function buscarEstoqueInstagram() {
   try {
     console.log("[Instagram] Buscando posts do estoque...");
@@ -178,7 +183,7 @@ async function buscarEstoqueInstagram() {
     const veiculos = [];
 
     for (const post of posts) {
-      const caption = post.caption || "";
+      const caption = limparTexto(post.caption || "");
 
       // Filtra posts que parecem ser anúncios de veículos (têm preço)
       if (!caption.includes("R$")) continue;
@@ -206,7 +211,7 @@ async function buscarEstoqueInstagram() {
 
       veiculos.push({
         id: post.id,
-        modelo: primeiraLinha.replace(/[🚗🚙🏎️]/g, "").trim(),
+        modelo: limparTexto(primeiraLinha).replace(/[🚗🚙🏎️]/g, "").trim(),
         marca: "",
         versao: "",
         ano,
