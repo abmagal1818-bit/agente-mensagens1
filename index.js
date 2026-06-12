@@ -2,7 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
 const https = require("https");
-const app = express()
+const app = express();
 app.use(express.json());
 
 const VERIFY_TOKEN = "meu_token_verificacao";
