@@ -13,6 +13,8 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const MOBIAUTO_EMAIL = process.env.MOBIAUTO_EMAIL || "premium@premiumautomarcas.com.br";
 const MOBIAUTO_SENHA = process.env.MOBIAUTO_SENHA || "f;I~5N=@@M";
 const LOJA_ID = "31402";
+const INSTAGRAM_TOKEN = process.env.INSTAGRAM_TOKEN || "EAAV9RujOhN8BRhGxYHPBovlpzTJZCnZBnHC2tjau2j0IzXOg44wahILb8ZCSkacvLFI7FHFI5d7ZCVt1MXE68eTqH9reAcw6fNvFVGU222b4uYoeqjnWBpxLzP2sWTkbSsOCoDzJdZAPk02rWnCfBd4S7TcQY9VdVZCh5vmyd9FCiwp3lZBLxVMxtntrNDXZBTKmrjcZD";
+const INSTAGRAM_ACCOUNT_ID = "17841407009898490";
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -161,51 +163,85 @@ async function buscarFotosVeiculo(id, authHeaders) {
   return [];
 }
 
-async function sincronizarEstoque() {
-  console.log("[Estoque] Iniciando sincronização...");
+// ─────────────────────────────────────────────
+// SINCRONIZADOR VIA INSTAGRAM
+// ─────────────────────────────────────────────
+
+async function buscarEstoqueInstagram() {
   try {
-    const auth = await fazerLoginMobigestor();
-    if (!auth) {
-      console.log("[Estoque] ❌ Falha no login");
-      return;
-    }
+    console.log("[Instagram] Buscando posts do estoque...");
+    const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media?fields=id,caption,media_type,media_url,children{media_url}&limit=50&access_token=${INSTAGRAM_TOKEN}`;
+    const res = await axios.get(url);
+    const posts = res.data.data || [];
+    console.log(`[Instagram] ${posts.length} posts encontrados`);
 
-    const resultado = await buscarVeiculosMobigestor(auth);
-    if (!resultado) {
-      console.log("[Estoque] ❌ Não foi possível buscar veículos");
-      return;
-    }
+    const veiculos = [];
 
-    const { lista, authHeaders } = resultado;
-    const estoqueNovo = [];
+    for (const post of posts) {
+      const caption = post.caption || "";
 
-    for (const v of lista) {
-      const id = v.id || v.anuncioId || v.codigoAnuncio || v.codigo;
-      const fotos = await buscarFotosVeiculo(id, authHeaders);
-      estoqueNovo.push({
-        id,
-        marca:         v.marca         || v.brand        || "",
-        modelo:        v.modelo        || v.model        || "",
-        versao:        v.versao        || v.version      || "",
-        ano:           v.anoModelo     || v.ano          || v.year || "",
-        anoFabricacao: v.anoFabricacao || "",
-        km:            v.quilometragem || v.km           || v.mileage || 0,
-        preco:         v.preco         || v.price        || 0,
-        cambio:        v.cambio        || v.transmission || "",
-        combustivel:   v.combustivel   || v.fuel         || "",
-        cor:           v.cor           || v.color        || "",
-        opcionais:     v.opcionais     || v.features     || [],
-        descricao:     v.descricao     || v.description  || "",
+      // Filtra posts que parecem ser anúncios de veículos (têm preço)
+      if (!caption.includes("R$")) continue;
+
+      // Extrai fotos
+      let fotos = [];
+      if (post.media_type === "CAROUSEL_ALBUM" && post.children) {
+        fotos = post.children.data.map(c => c.media_url).filter(Boolean);
+      } else if (post.media_url) {
+        fotos = [post.media_url];
+      }
+
+      // Extrai dados do caption
+      const precoMatch = caption.match(/R\$\s*([\d.,]+)/);
+      const kmMatch = caption.match(/([\d.,]+)\s*km/i);
+      const anoMatch = caption.match(/(\d{4})\/\d{4}|(\d{4})/);
+
+      // Extrai modelo da primeira linha
+      const linhas = caption.split("\n").filter(l => l.trim());
+      const primeiraLinha = linhas[0] || "";
+
+      const preco = precoMatch ? parseFloat(precoMatch[1].replace(/\./g, "").replace(",", ".")) : 0;
+      const km = kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0;
+      const ano = anoMatch ? (anoMatch[1] || anoMatch[2]) : "";
+
+      veiculos.push({
+        id: post.id,
+        modelo: primeiraLinha.replace(/[🚗🚙🏎️]/g, "").trim(),
+        marca: "",
+        versao: "",
+        ano,
+        km,
+        preco,
+        cambio: "",
+        combustivel: "",
+        cor: "",
+        descricao: caption,
         fotos,
+        atualizadoEm: new Date().toISOString(),
       });
-      await new Promise(r => setTimeout(r, 200));
     }
 
-    estoqueAtual = estoqueNovo;
-    ultimaAtualizacao = new Date().toLocaleString("pt-BR");
-    const comFotos = estoqueNovo.filter(v => v.fotos.length > 0).length;
-    console.log(`[Estoque] ✅ ${estoqueNovo.length} veículos | ${comFotos} com fotos | ${ultimaAtualizacao}`);
+    console.log(`[Instagram] ✅ ${veiculos.length} veículos extraídos`);
+    return veiculos;
+  } catch(e) {
+    console.error("[Instagram] Erro:", e.message);
+    if (e.response) console.error("[Instagram] Detalhe:", JSON.stringify(e.response.data));
+    return [];
+  }
+}
 
+async function sincronizarEstoque() {
+  console.log("[Estoque] Iniciando sincronização via Instagram...");
+  try {
+    const veiculos = await buscarEstoqueInstagram();
+    if (veiculos.length > 0) {
+      estoqueAtual = veiculos;
+      ultimaAtualizacao = new Date().toLocaleString("pt-BR");
+      const comFotos = veiculos.filter(v => v.fotos.length > 0).length;
+      console.log(`[Estoque] ✅ ${veiculos.length} veículos | ${comFotos} com fotos | ${ultimaAtualizacao}`);
+    } else {
+      console.log("[Estoque] ⚠️ Nenhum veículo encontrado no Instagram");
+    }
   } catch(e) {
     console.error("[Estoque] Erro:", e.message);
   }
