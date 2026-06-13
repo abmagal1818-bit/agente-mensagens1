@@ -213,13 +213,15 @@ async function sheetsGet(range) {
   const token = await obterTokenSheets();
   if (!token) return null;
   try {
+    const encoded = range.replace("Mensagens", "Mensagens").replace("Aprendizados", "Aprendizados");
     const res = await axios.get(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(encoded)}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
+    console.log(`[Sheets] GET ${range}: ${res.data.values ? res.data.values.length : 0} linhas`);
     return res.data.values || [];
   } catch(e) {
-    console.error("[Sheets] Erro get:", e.message);
+    console.error("[Sheets] Erro get:", e.response?.status, e.response?.data?.error?.message || e.message);
     return null;
   }
 }
@@ -233,8 +235,9 @@ async function sheetsAppend(range, values) {
       { values },
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
     );
+    console.log(`[Sheets] Append OK: ${range}`);
   } catch(e) {
-    console.error("[Sheets] Erro append:", e.message);
+    console.error("[Sheets] Erro append:", e.response?.status, e.response?.data?.error?.message || e.message);
   }
 }
 
@@ -247,8 +250,9 @@ async function sheetsUpdate(range, values) {
       { values },
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
     );
+    console.log(`[Sheets] Update OK: ${range}`);
   } catch(e) {
-    console.error("[Sheets] Erro update:", e.message);
+    console.error("[Sheets] Erro update:", e.response?.status, e.response?.data?.error?.message || e.message);
   }
 }
 
