@@ -26,6 +26,7 @@ const INSTAGRAM_TOKEN = process.env.INSTAGRAM_TOKEN || "EAAV9RujOhN8BRhGxYHPBovl
 const INSTAGRAM_ACCOUNT_ID = "17841407009898490";
 const SHEETS_ID = process.env.SHEETS_ID || "1zhOUFmzlwHsyCh3OuYAdZzMYN3EfKLxkVgODJxgxdYo";
 const SHEETS_CREDENTIALS = process.env.GOOGLE_CREDENTIALS ? JSON.parse(process.env.GOOGLE_CREDENTIALS) : null;
+const NUMERO_AUGUSTO = process.env.NUMERO_AUGUSTO || "5551993716729";
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -335,6 +336,36 @@ async function formatarAprendizados() {
   if (aprendizados.length === 0) return "";
   return "\n\nEXEMPLOS DE COMO RESPONDER (aprenda com esses casos):\n" +
     aprendizados.slice(-10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
+}
+
+// Notifica Augusto quando cliente novo entrar em contato
+const clientesNotificados = new Set();
+
+async function notificarAugusto(from, primeiroTexto) {
+  if (clientesNotificados.has(from)) return;
+  clientesNotificados.add(from);
+  
+  const numero = from.replace(/\D/g, "");
+  const formatado = numero.length >= 12 
+    ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}`
+    : from;
+  
+  const mensagem = `📩 *Novo cliente na Sara*\nNúmero: ${formatado}\nMensagem: "${primeiroTexto.substring(0,100)}"\n\nAcesse o painel: https://agente-mensagens1.onrender.com/painel`;
+  
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: NUMERO_AUGUSTO,
+        text: { body: mensagem }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[Notificação] Augusto notificado sobre cliente ${from}`);
+  } catch(e) {
+    console.error("[Notificação] Erro:", e.message);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -761,9 +792,13 @@ function detectarPedidoDeFotos(texto, estoque, historicoConversa) {
 }
 
 async function processarMensagem(from, text) {
+  const clienteNovo = !conversas[from];
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
   salvarMensagemSheets(from, "client", text).catch(()=>{});
+  
+  // Notifica Augusto apenas na primeira mensagem do cliente
+  if (clienteNovo) notificarAugusto(from, text).catch(()=>{});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   // Verifica se cliente pediu fotos
