@@ -477,10 +477,27 @@ Apresente assim: "Com base no que você me passou, conseguimos trabalhar entre R
 Colete as informações do carro (km, estado, revisões, fotos) antes de qualquer estimativa.`
   }
 
-SIMULAÇÃO DE FINANCIAMENTO:
-Pergunte valor, entrada e prazo. Taxa 1,8%/mês.
-Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
-Apresente apenas o valor da parcela, sem mencionar a fórmula.
+SIMULACAO DE FINANCIAMENTO COM TROCA:
+Quando o cliente tem um carro para dar na troca com divida:
+
+Passo 1 — Calcular saldo liquido da troca:
+Saldo = Valor avaliado do carro do cliente - Divida restante do carro do cliente
+Exemplo: Ka avaliado em R$ 22.000, deve R$ 18.000 → saldo liquido = R$ 4.000
+
+Passo 2 — Calcular valor a financiar ou diferenca:
+Se saldo liquido < preco do carro desejado:
+  → Cliente ainda precisa pagar: preco desejado - saldo liquido
+  → Apresente: "Voce daria o Ka como entrada (saldo de R$ 4.000) e financiaria os R$ 11.990 restantes"
+Se saldo liquido > preco do carro desejado:
+  → Cliente recebe diferenca de volta: saldo liquido - preco desejado
+  → Apresente: "Voce daria o Ka como entrada e ainda receberia R$ X de volta"
+
+Passo 3 — Simulacao de parcelas:
+Taxa 1,8%/mes. Formula: PMT = PV x (i x (1+i)^n) / ((1+i)^n - 1)
+PV = valor a financiar (apos descontar entrada/troca)
+Apresente apenas o valor da parcela, sem mencionar formula.
+
+NUNCA diga que o cliente "leva o carro e ainda recebe diferenca" quando o saldo da troca for menor que o preco do carro.
 
 REGRAS:
 - Primeira mensagem: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
@@ -562,13 +579,22 @@ async function processarMensagem(from, text) {
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   // Verifica se cliente pediu fotos
-  const veiculoComFotos = detectarPedidoDeFotos(text, estoqueAtual, conversas[from]);
+  // Só detecta pedido de fotos se for mensagem de texto (não quando cliente manda imagem)
+  const ehMensagemTexto = !text.startsWith("[Cliente enviou foto");
+  
+  // Verifica se já enviou fotos nos últimos 3 turnos para evitar duplicatas
+  const ultimasMensagens = (conversas[from] || []).slice(-6).map(m => m.content || "").join(" ");
+  const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos do");
+
+  const veiculoComFotos = ehMensagemTexto && !jaEnviouFotos 
+    ? detectarPedidoDeFotos(text, estoqueAtual, conversas[from]) 
+    : null;
+    
   let fotosEnviadas = false;
   if (veiculoComFotos && veiculoComFotos.fotos.length > 0) {
     console.log(`[Fotos] Enviando fotos do ${veiculoComFotos.modelo}`);
     await enviarFotosVeiculo(from, veiculoComFotos);
     fotosEnviadas = true;
-    // Avisa o Claude que as fotos já foram enviadas
     conversas[from].push({ role: "user", content: `[Sistema: fotos do ${limparTexto(veiculoComFotos.modelo)} ja foram enviadas automaticamente pelo WhatsApp. Confirme que as fotos foram enviadas e pergunte se precisa de mais informacoes.]` });
   }
 
