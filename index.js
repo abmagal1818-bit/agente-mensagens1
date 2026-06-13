@@ -894,7 +894,333 @@ app.get("/assinar-webhook", async (req, res) => {
 // ─────────────────────────────────────────────
 
 app.get("/painel", (req, res) => {
-  res.sendFile("/home/claude/painel.html");
+  const painelHTML = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sara - Painel de Monitoramento</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  
+  header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 18px; color: #fff; }
+  header h1 span { color: #f0a500; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #888; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* Lista de conversas */
+  .sidebar { width: 280px; background: #161616; border-right: 1px solid #2a2a2a; display: flex; flex-direction: column; }
+  .sidebar-header { padding: 12px 16px; font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #2a2a2a; }
+  .conv-list { flex: 1; overflow-y: auto; }
+  .conv-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #1f1f1f; transition: background 0.15s; }
+  .conv-item:hover { background: #1e1e1e; }
+  .conv-item.active { background: #1e2a1e; border-left: 3px solid #f0a500; }
+  .conv-item.unread { border-left: 3px solid #f44336; }
+  .conv-phone { font-size: 13px; font-weight: 600; color: #fff; }
+  .conv-preview { font-size: 12px; color: #666; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-time { font-size: 11px; color: #555; margin-top: 2px; }
+  .conv-badge { display: inline-block; background: #f44336; color: #fff; font-size: 10px; padding: 1px 5px; border-radius: 10px; margin-left: 4px; }
+
+  /* Área de chat */
+  .chat-area { flex: 1; display: flex; flex-direction: column; }
+  .chat-header { padding: 12px 20px; background: #1a1a1a; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; justify-content: space-between; }
+  .chat-phone { font-size: 15px; font-weight: 600; }
+  .chat-actions { display: flex; gap: 8px; }
+  .btn { padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: #f0a500; color: #000; }
+  .btn-danger { background: #f44336; color: #fff; }
+  .btn-secondary { background: #333; color: #fff; }
+
+  .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 75%; }
+  .msg.client { align-self: flex-start; }
+  .msg.sara { align-self: flex-end; }
+  .msg.intervencao { align-self: flex-end; }
+  .msg-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
+  .msg.client .msg-bubble { background: #2a2a2a; color: #e0e0e0; border-bottom-left-radius: 3px; }
+  .msg.sara .msg-bubble { background: #1a3a1a; color: #b8e6b8; border-bottom-right-radius: 3px; }
+  .msg.intervencao .msg-bubble { background: #2a1a00; color: #f0c060; border-bottom-right-radius: 3px; border: 1px solid #f0a500; }
+  .msg-meta { font-size: 11px; color: #555; margin-top: 3px; }
+  .msg.sara .msg-meta, .msg.intervencao .msg-meta { text-align: right; }
+  .msg-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+  .msg.client .msg-label { color: #666; }
+  .msg.sara .msg-label { color: #4a8; text-align: right; }
+  .msg.intervencao .msg-label { color: #f0a500; text-align: right; }
+
+  /* Área de intervenção */
+  .intervention { background: #1a1a1a; border-top: 1px solid #2a2a2a; padding: 12px 16px; }
+  .intervention-header { font-size: 11px; color: #f0a500; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .intervention-input { display: flex; gap: 8px; }
+  .intervention-input textarea { flex: 1; background: #252525; border: 1px solid #333; border-radius: 8px; color: #fff; padding: 10px 12px; font-size: 14px; resize: none; height: 60px; font-family: inherit; }
+  .intervention-input textarea:focus { outline: none; border-color: #f0a500; }
+
+  /* Painel de aprendizado */
+  .learning-panel { width: 260px; background: #161616; border-left: 1px solid #2a2a2a; display: flex; flex-direction: column; }
+  .learning-header { padding: 12px 16px; font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #2a2a2a; }
+  .learning-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .learning-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #f0a500; }
+  .learning-item .situation { color: #888; margin-bottom: 4px; }
+  .learning-item .correction { color: #b8e6b8; }
+  .learning-count { padding: 8px 16px; font-size: 12px; color: #555; border-top: 1px solid #2a2a2a; }
+
+  .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: #444; }
+  .empty-state svg { opacity: 0.3; }
+
+  /* Loading */
+  .loading { text-align: center; padding: 20px; color: #555; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sara <span>Premium Automarcas</span></h1>
+  <div class="status">
+    <div class="dot"></div>
+    <span id="statusText">Conectando...</span>
+  </div>
+</header>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">Conversas Ativas</div>
+    <div class="conv-list" id="convList">
+      <div class="loading">Carregando...</div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat-area">
+    <div class="chat-header" id="chatHeader">
+      <div class="chat-phone" id="chatPhone">Selecione uma conversa</div>
+      <div class="chat-actions" id="chatActions" style="display:none">
+        <button class="btn btn-secondary" onclick="marcarResolvido()">✓ Resolvido</button>
+        <button class="btn btn-danger" onclick="salvarAprendizado()">💡 Salvar como aprendizado</button>
+      </div>
+    </div>
+    <div class="messages" id="messages">
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        <span>Selecione uma conversa</span>
+      </div>
+    </div>
+    <div class="intervention" id="interventionArea" style="display:none">
+      <div class="intervention-header">⚡ Intervenção — mensagem enviada como Sara</div>
+      <div class="intervention-input">
+        <textarea id="interventionText" placeholder="Digite a resposta correta e pressione Enter para enviar como Sara..."></textarea>
+        <button class="btn btn-primary" onclick="enviarIntervencao()">Enviar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Painel de aprendizado -->
+  <div class="learning-panel">
+    <div class="learning-header">💡 Base de Aprendizado</div>
+    <div class="learning-list" id="learningList">
+      <div class="loading">Carregando...</div>
+    </div>
+    <div class="learning-count" id="learningCount"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let conversaAtiva = null;
+let intervalo = null;
+
+// Formata número de telefone
+function formatarTelefone(num) {
+  const n = String(num).replace(/\\D/g, '');
+  if (n.length >= 12) return \`+\${n.slice(0,2)} (\${n.slice(2,4)}) \${n.slice(4,9)}-\${n.slice(9)}\`;
+  return num;
+}
+
+// Formata hora
+function formatarHora(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+}
+
+// Carrega lista de conversas
+async function carregarConversas() {
+  try {
+    const res = await fetch(\`\${API}/painel/conversas\`);
+    const data = await res.json();
+    const list = document.getElementById('convList');
+    
+    if (!data.conversas || data.conversas.length === 0) {
+      list.innerHTML = '<div class="loading">Nenhuma conversa ainda</div>';
+      return;
+    }
+
+    list.innerHTML = data.conversas.map(c => \`
+      <div class="conv-item \${c.from === conversaAtiva ? 'active' : ''} \${c.naoLida ? 'unread' : ''}" 
+           onclick="abrirConversa('\${c.from}')">
+        <div class="conv-phone">
+          \${formatarTelefone(c.from)}
+          \${c.naoLida ? \`<span class="conv-badge">\${c.naoLida}</span>\` : ''}
+        </div>
+        <div class="conv-preview">\${c.ultimaMensagem || ''}</div>
+        <div class="conv-time">\${formatarHora(c.ultimaAtividade)}</div>
+      </div>
+    \`).join('');
+
+    document.getElementById('statusText').textContent = \`\${data.conversas.length} conversa(s) ativa(s)\`;
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Erro de conexão';
+  }
+}
+
+// Abre conversa
+async function abrirConversa(from) {
+  conversaAtiva = from;
+  document.getElementById('chatPhone').textContent = formatarTelefone(from);
+  document.getElementById('chatActions').style.display = 'flex';
+  document.getElementById('interventionArea').style.display = 'block';
+  
+  await carregarMensagens(from);
+  await carregarConversas();
+}
+
+// Carrega mensagens de uma conversa
+async function carregarMensagens(from) {
+  try {
+    const res = await fetch(\`\${API}/painel/mensagens/\${from}\`);
+    const data = await res.json();
+    const msgs = document.getElementById('messages');
+    
+    if (!data.mensagens || data.mensagens.length === 0) {
+      msgs.innerHTML = '<div class="loading">Nenhuma mensagem</div>';
+      return;
+    }
+
+    msgs.innerHTML = data.mensagens.map(m => \`
+      <div class="msg \${m.tipo}">
+        <div class="msg-label">\${m.tipo === 'client' ? '👤 Cliente' : m.tipo === 'sara' ? '🤖 Sara' : '⚡ Você'}</div>
+        <div class="msg-bubble">\${m.texto.replace(/\\n/g, '<br>').replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')}</div>
+        <div class="msg-meta">\${formatarHora(m.timestamp)}</div>
+      </div>
+    \`).join('');
+    
+    msgs.scrollTop = msgs.scrollHeight;
+  } catch(e) {
+    console.error('Erro ao carregar mensagens:', e);
+  }
+}
+
+// Envia intervenção
+async function enviarIntervencao() {
+  if (!conversaAtiva) return;
+  const texto = document.getElementById('interventionText').value.trim();
+  if (!texto) return;
+
+  try {
+    const res = await fetch(\`\${API}/painel/intervencao\`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ from: conversaAtiva, texto })
+    });
+    
+    if (res.ok) {
+      document.getElementById('interventionText').value = '';
+      await carregarMensagens(conversaAtiva);
+    }
+  } catch(e) {
+    alert('Erro ao enviar mensagem');
+  }
+}
+
+// Salvar como aprendizado
+async function salvarAprendizado() {
+  if (!conversaAtiva) return;
+  const situacao = prompt('Descreva brevemente a situação (ex: "cliente perguntou sobre troco"):');
+  if (!situacao) return;
+  const correcao = prompt('Como a Sara deveria ter respondido?');
+  if (!correcao) return;
+
+  try {
+    await fetch(\`\${API}/painel/aprendizado\`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ situacao, correcao, from: conversaAtiva })
+    });
+    await carregarAprendizados();
+    alert('Aprendizado salvo! Sara vai usar isso nas próximas conversas.');
+  } catch(e) {
+    alert('Erro ao salvar aprendizado');
+  }
+}
+
+// Marca conversa como resolvida
+async function marcarResolvido() {
+  if (!conversaAtiva) return;
+  await fetch(\`\${API}/painel/resolver\`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: conversaAtiva })
+  });
+  conversaAtiva = null;
+  document.getElementById('chatPhone').textContent = 'Selecione uma conversa';
+  document.getElementById('chatActions').style.display = 'none';
+  document.getElementById('interventionArea').style.display = 'none';
+  document.getElementById('messages').innerHTML = '<div class="empty-state"><span>Selecione uma conversa</span></div>';
+  await carregarConversas();
+}
+
+// Carrega aprendizados
+async function carregarAprendizados() {
+  try {
+    const res = await fetch(\`\${API}/painel/aprendizados\`);
+    const data = await res.json();
+    const list = document.getElementById('learningList');
+    
+    if (!data.aprendizados || data.aprendizados.length === 0) {
+      list.innerHTML = '<div class="loading" style="color:#555">Nenhum aprendizado ainda</div>';
+      document.getElementById('learningCount').textContent = '';
+      return;
+    }
+
+    list.innerHTML = data.aprendizados.slice(-20).reverse().map(a => \`
+      <div class="learning-item">
+        <div class="situation">📌 \${a.situacao}</div>
+        <div class="correction">✓ \${a.correcao.substring(0, 100)}\${a.correcao.length > 100 ? '...' : ''}</div>
+      </div>
+    \`).join('');
+    
+    document.getElementById('learningCount').textContent = \`\${data.aprendizados.length} aprendizado(s) registrado(s)\`;
+  } catch(e) {}
+}
+
+// Enter para enviar intervenção
+document.getElementById('interventionText').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    enviarIntervencao();
+  }
+});
+
+// Atualização automática
+async function atualizar() {
+  await carregarConversas();
+  if (conversaAtiva) await carregarMensagens(conversaAtiva);
+}
+
+carregarConversas();
+carregarAprendizados();
+setInterval(atualizar, 5000); // Atualiza a cada 5 segundos
+</script>
+</body>
+</html>
+`;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(painelHTML);
 });
 
 app.get("/painel/conversas", async (req, res) => {
