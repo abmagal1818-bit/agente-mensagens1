@@ -13,8 +13,12 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const MOBIAUTO_EMAIL = process.env.MOBIAUTO_EMAIL || "premium@premiumautomarcas.com.br";
 const MOBIAUTO_SENHA = process.env.MOBIAUTO_SENHA || "f;I~5N=@@M";
 const LOJA_ID = "31402";
+const fs = require("fs");
+const path = require("path");
 const INSTAGRAM_TOKEN = process.env.INSTAGRAM_TOKEN || "EAAV9RujOhN8BRhGxYHPBovlpzTJZCnZBnHC2tjau2j0IzXOg44wahILb8ZCSkacvLFI7FHFI5d7ZCVt1MXE68eTqH9reAcw6fNvFVGU222b4uYoeqjnWBpxLzP2sWTkbSsOCoDzJdZAPk02rWnCfBd4S7TcQY9VdVZCh5vmyd9FCiwp3lZBLxVMxtntrNDXZBTKmrjcZD";
 const INSTAGRAM_ACCOUNT_ID = "17841407009898490";
+const SHEETS_ID = process.env.SHEETS_ID || "1zhOUFmzlwHsyCh3OuYAdZzMYN3EfKLxkVgODJxgxdYo";
+const SHEETS_CREDENTIALS = process.env.GOOGLE_CREDENTIALS ? JSON.parse(process.env.GOOGLE_CREDENTIALS) : null;
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -163,6 +167,165 @@ async function buscarFotosVeiculo(id, authHeaders) {
   return [];
 }
 
+
+// ─────────────────────────────────────────────
+// GOOGLE SHEETS — PAINEL E APRENDIZADO
+// ─────────────────────────────────────────────
+
+async function obterTokenSheets() {
+  if (!SHEETS_CREDENTIALS) return null;
+  try {
+    const jwt = require("crypto");
+    const now = Math.floor(Date.now() / 1000);
+    const header = Buffer.from(JSON.stringify({alg:"RS256",typ:"JWT"})).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({
+      iss: SHEETS_CREDENTIALS.client_email,
+      scope: "https://www.googleapis.com/auth/spreadsheets",
+      aud: "https://oauth2.googleapis.com/token",
+      exp: now + 3600,
+      iat: now
+    })).toString("base64url");
+    
+    const sign = require("crypto").createSign("RSA-SHA256");
+    sign.update(`${header}.${payload}`);
+    const signature = sign.sign(SHEETS_CREDENTIALS.private_key, "base64url");
+    const jwtToken = `${header}.${payload}.${signature}`;
+    
+    const res = await axios.post("https://oauth2.googleapis.com/token", 
+      `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwtToken}`,
+      { headers: {"Content-Type": "application/x-www-form-urlencoded"} }
+    );
+    return res.data.access_token;
+  } catch(e) {
+    console.error("[Sheets] Erro ao obter token:", e.message);
+    return null;
+  }
+}
+
+async function sheetsGet(range) {
+  const token = await obterTokenSheets();
+  if (!token) return null;
+  try {
+    const res = await axios.get(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    return res.data.values || [];
+  } catch(e) {
+    console.error("[Sheets] Erro get:", e.message);
+    return null;
+  }
+}
+
+async function sheetsAppend(range, values) {
+  const token = await obterTokenSheets();
+  if (!token) return;
+  try {
+    await axios.post(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      { values },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+    );
+  } catch(e) {
+    console.error("[Sheets] Erro append:", e.message);
+  }
+}
+
+async function sheetsUpdate(range, values) {
+  const token = await obterTokenSheets();
+  if (!token) return;
+  try {
+    await axios.put(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+      { values },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+    );
+  } catch(e) {
+    console.error("[Sheets] Erro update:", e.message);
+  }
+}
+
+// Inicializa abas da planilha
+async function inicializarSheets() {
+  if (!SHEETS_CREDENTIALS) { console.log("[Sheets] Sem credenciais — painel desativado"); return; }
+  try {
+    const token = await obterTokenSheets();
+    if (!token) return;
+    
+    // Cria abas se não existirem
+    await axios.post(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}:batchUpdate`,
+      { requests: [
+        { addSheet: { properties: { title: "Mensagens" } } },
+        { addSheet: { properties: { title: "Aprendizados" } } }
+      ]},
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+    ).catch(() => {}); // Ignora erro se já existir
+    
+    // Cabeçalhos
+    await sheetsUpdate("Mensagens!A1:F1", [["Timestamp","De","Tipo","Texto","Resolvido","Intervenção"]]);
+    await sheetsUpdate("Aprendizados!A1:C1", [["Timestamp","Situação","Correção"]]);
+    console.log("[Sheets] ✅ Planilha inicializada");
+  } catch(e) {
+    console.error("[Sheets] Erro init:", e.message);
+  }
+}
+
+// Salva mensagem na planilha
+async function salvarMensagemSheets(from, tipo, texto) {
+  await sheetsAppend("Mensagens!A:F", [[
+    new Date().toISOString(), from, tipo, 
+    String(texto).substring(0, 500), "não", ""
+  ]]);
+}
+
+// Busca mensagens de uma conversa
+async function buscarMensagensSheets(from) {
+  const rows = await sheetsGet("Mensagens!A:F");
+  if (!rows) return [];
+  return rows.slice(1)
+    .filter(r => r[1] === from)
+    .map(r => ({ timestamp: r[0], from: r[1], tipo: r[2], texto: r[3] || "" }));
+}
+
+// Lista conversas ativas
+async function listarConversasSheets() {
+  const rows = await sheetsGet("Mensagens!A:F");
+  if (!rows) return [];
+  
+  const mapa = {};
+  rows.slice(1).forEach(r => {
+    const from = r[1];
+    const resolvido = r[4] === "sim";
+    if (!from || resolvido) return;
+    if (!mapa[from] || r[0] > mapa[from].ultimaAtividade) {
+      mapa[from] = {
+        from,
+        ultimaMensagem: (r[3] || "").substring(0, 50),
+        ultimaAtividade: r[0],
+        naoLida: (mapa[from]?.naoLida || 0) + (r[2] === "client" ? 1 : 0)
+      };
+    }
+  });
+  
+  return Object.values(mapa).sort((a,b) => b.ultimaAtividade.localeCompare(a.ultimaAtividade));
+}
+
+// Busca aprendizados
+async function buscarAprendizadosSheets() {
+  const rows = await sheetsGet("Aprendizados!A:C");
+  if (!rows) return [];
+  return rows.slice(1).map(r => ({ timestamp: r[0], situacao: r[1] || "", correcao: r[2] || "" }));
+}
+
+// Formata aprendizados para o system prompt
+async function formatarAprendizados() {
+  const aprendizados = await buscarAprendizadosSheets();
+  if (aprendizados.length === 0) return "";
+  return "\n\nEXEMPLOS DE COMO RESPONDER (aprenda com esses casos):\n" +
+    aprendizados.slice(-10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
+}
+
 // ─────────────────────────────────────────────
 // SINCRONIZADOR VIA INSTAGRAM
 // ─────────────────────────────────────────────
@@ -257,6 +420,7 @@ async function sincronizarEstoque() {
 // Roda ao iniciar e depois a cada 6 horas
 sincronizarEstoque();
 setInterval(sincronizarEstoque, 6 * 60 * 60 * 1000);
+inicializarSheets();
 
 // ─────────────────────────────────────────────
 // FUNÇÕES DA SARA (sem alteração)
@@ -417,7 +581,7 @@ async function analisarImagem(mediaId, caption) {
   }
 }
 
-const SYSTEM_PROMPT = (fipeInfo) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "") => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
 EMPRESA:
 - Endereço: Av. Aparício Borges, 931 - Porto Alegre/RS
@@ -518,7 +682,7 @@ REGRAS:
 - Emojis com moderação 🚗
 - Humano: (51) 99364-2476
 - NUNCA invente links, URLs ou endereços de site
-- NUNCA invente informações de estoque`;
+- NUNCA invente informações de estoque${aprendizadosExtra}`;
 
 // Envia fotos de um veículo pelo WhatsApp
 async function enviarFotosVeiculo(to, veiculo) {
@@ -588,6 +752,7 @@ function detectarPedidoDeFotos(texto, estoque, historicoConversa) {
 async function processarMensagem(from, text) {
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
+  salvarMensagemSheets(from, "client", text).catch(()=>{});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   // Verifica se cliente pediu fotos
@@ -620,7 +785,7 @@ async function processarMensagem(from, text) {
     {
       model: "claude-sonnet-4-5",
       max_tokens: 500,
-      system: SYSTEM_PROMPT(fipeInfo),
+      system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(()=>"")),
       messages: conversas[from]
     },
     { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
@@ -636,6 +801,7 @@ async function processarMensagem(from, text) {
   );
 
   console.log(`Resposta para ${from}: ${reply}`);
+  salvarMensagemSheets(from, "sara", reply).catch(()=>{});
 }
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
@@ -721,6 +887,86 @@ app.get("/assinar-webhook", async (req, res) => {
   } catch (e) {
     res.send("Erro: " + JSON.stringify(e.response?.data));
   }
+});
+
+// ─────────────────────────────────────────────
+// ROTAS DO PAINEL
+// ─────────────────────────────────────────────
+
+app.get("/painel", (req, res) => {
+  res.sendFile("/home/claude/painel.html");
+});
+
+app.get("/painel/conversas", async (req, res) => {
+  try {
+    const conversas = await listarConversasSheets();
+    res.json({ conversas });
+  } catch(e) {
+    res.json({ conversas: [] });
+  }
+});
+
+app.get("/painel/mensagens/:from", async (req, res) => {
+  try {
+    const mensagens = await buscarMensagensSheets(req.params.from);
+    res.json({ mensagens });
+  } catch(e) {
+    res.json({ mensagens: [] });
+  }
+});
+
+app.post("/painel/intervencao", async (req, res) => {
+  const { from, texto } = req.body;
+  if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
+  
+  try {
+    // Envia mensagem pelo WhatsApp como Sara
+    await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: from, text: { body: texto } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    
+    // Salva no histórico e no Sheets
+    if (!conversas[from]) conversas[from] = [];
+    conversas[from].push({ role: "assistant", content: texto });
+    await salvarMensagemSheets(from, "intervencao", texto);
+    
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/painel/aprendizado", async (req, res) => {
+  const { situacao, correcao } = req.body;
+  if (!situacao || !correcao) return res.status(400).json({ erro: "Dados inválidos" });
+  
+  try {
+    await sheetsAppend("Aprendizados!A:C", [[
+      new Date().toISOString(), situacao, correcao
+    ]]);
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/painel/aprendizados", async (req, res) => {
+  try {
+    const aprendizados = await buscarAprendizadosSheets();
+    res.json({ aprendizados });
+  } catch(e) {
+    res.json({ aprendizados: [] });
+  }
+});
+
+app.post("/painel/resolver", async (req, res) => {
+  const { from } = req.body;
+  // Marca todas as mensagens desse contato como resolvidas
+  // Por simplicidade, apenas limpa do histórico em memória
+  if (conversas[from]) delete conversas[from];
+  res.json({ ok: true });
 });
 
 const PORT = process.env.PORT || 10000;
