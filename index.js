@@ -209,6 +209,8 @@ async function buscarEstoqueInstagram() {
       const km = kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0;
       const ano = anoMatch ? (anoMatch[1] || anoMatch[2]) : "";
 
+      console.log(`[Instagram] Extraindo: "${primeiraLinha.substring(0,40)}" | preco=${preco} | km=${km} | ano=${ano}`);
+
       veiculos.push({
         id: post.id,
         modelo: limparTexto(primeiraLinha).replace(/[🚗🚙🏎️]/g, "").trim(),
@@ -431,6 +433,12 @@ PERFIL:
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
 
+REGRA CRITICA DE PRECOS:
+- Os precos acima sao EXATOS e DEFINITIVOS
+- NUNCA altere, arredonde ou invente precos
+- Se o preco do estoque diz R$ 15.990, voce responde R$ 15.990
+- Nao some, nao subtraia, nao estime — use EXATAMENTE o valor do estoque
+
 FOTOS DOS VEÍCULOS:
 Quando o cliente pedir fotos de um veículo específico, envie as fotos disponíveis.
 Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
@@ -555,9 +563,13 @@ async function processarMensagem(from, text) {
 
   // Verifica se cliente pediu fotos
   const veiculoComFotos = detectarPedidoDeFotos(text, estoqueAtual, conversas[from]);
+  let fotosEnviadas = false;
   if (veiculoComFotos && veiculoComFotos.fotos.length > 0) {
-    console.log(`[Fotos] Enviando fotos do ${veiculoComFotos.marca} ${veiculoComFotos.modelo}`);
+    console.log(`[Fotos] Enviando fotos do ${veiculoComFotos.modelo}`);
     await enviarFotosVeiculo(from, veiculoComFotos);
+    fotosEnviadas = true;
+    // Avisa o Claude que as fotos já foram enviadas
+    conversas[from].push({ role: "user", content: `[Sistema: fotos do ${limparTexto(veiculoComFotos.modelo)} ja foram enviadas automaticamente pelo WhatsApp. Confirme que as fotos foram enviadas e pergunte se precisa de mais informacoes.]` });
   }
 
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
