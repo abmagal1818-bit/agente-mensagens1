@@ -755,7 +755,9 @@ async function enviarFotosVeiculo(to, veiculo) {
 // Detecta se cliente pediu fotos e de qual veículo
 function detectarPedidoDeFotos(texto, estoque, historicoConversa) {
   const t = texto.toLowerCase();
-  const pedindoFotos = t.includes("foto") || t.includes("imagem") || t.includes("ver o carro") || t.includes("tem foto") || t.includes("manda foto") || t.includes("mandar foto");
+  const pedindoFotos = t.includes("foto") || t.includes("imagem") || t.includes("ver o carro") || 
+    t.includes("tem foto") || t.includes("manda foto") || t.includes("mandar foto") ||
+    t.includes("interior") || t.includes("interna") || t.includes("dentro") || t.includes("banco");
   if (!pedindoFotos) return null;
 
   // Junta texto atual + últimas mensagens para contexto
