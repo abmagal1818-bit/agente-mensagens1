@@ -37,6 +37,9 @@ let cacheMarcasFipe = null;
 const filaFotos = {};
 const ultimaNotificacao = {};
 
+// Controla quando cada conversa foi visualizada no painel
+const conversasVisualizadas = {};
+
 // ─────────────────────────────────────────────
 // UTILITÁRIOS
 // ─────────────────────────────────────────────
@@ -114,10 +117,18 @@ async function listarConversas() {
           from: m.telefone,
           ultimaMensagem: m.texto?.substring(0, 50) || "",
           ultimaAtividade: m.criado_em,
-          naoLida: m.tipo === "client" ? 1 : 0
+          naoLida: 0
         };
-      } else if (m.tipo === "client") {
-        mapa[m.telefone].naoLida++;
+      }
+
+      // Conta como não lida apenas mensagens do cliente
+      // que chegaram DEPOIS da última vez que você abriu a conversa no painel
+      if (m.tipo === "client") {
+        const visualizadoEm = conversasVisualizadas[m.telefone] || 0;
+        const chegouEm = new Date(m.criado_em).getTime();
+        if (chegouEm > visualizadoEm) {
+          mapa[m.telefone].naoLida++;
+        }
       }
     });
 
@@ -527,16 +538,14 @@ async function analisarImagem(mediaId, caption) {
 }
 
 // ─────────────────────────────────────────────
-// FOTOS DO ESTOQUE — DETECÇÃO CORRIGIDA
+// FOTOS DO ESTOQUE
 // ─────────────────────────────────────────────
 
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
 
-  // Se cliente está em fluxo de troca, NÃO envia fotos do estoque
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
 
-  // Detecta "sim/quero/pode/manda" quando Sarah ofereceu fotos na última mensagem
   const ultimaResposta = (historicoConversa || [])
     .filter(m => m.role === "assistant")
     .slice(-1)[0]?.content || "";
@@ -546,7 +555,6 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
     return true;
   }
 
-  // Frases que NÃO são pedido de fotos do estoque
   const naoEPedido = [
     "te mando", "vou mandar", "vou te mandar", "ja mando", "já mando",
     "mando agora", "mando foto", "mandando foto", "vou enviar",
@@ -554,7 +562,6 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   ];
   if (naoEPedido.some(p => t.includes(p))) return false;
 
-  // Frases que SÃO pedido de fotos do estoque
   const ePedido = [
     "tem foto", "tem fotos", "manda foto", "manda as foto",
     "pode mandar foto", "me manda foto", "me passa foto",
@@ -573,7 +580,6 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     .filter(m => m.role === "user").slice(-8).map(m => m.content)
   ].join(" ").toLowerCase();
 
-  // Também considera a última resposta da Sarah para pegar o veículo mencionado
   const ultimaResposta = (historicoConversa || [])
     .filter(m => m.role === "assistant")
     .slice(-1)[0]?.content || "";
@@ -724,7 +730,6 @@ async function processarMensagem(from, text) {
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
 
-  // Detecta pedido de fotos DO ESTOQUE
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
   const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos enviadas");
@@ -930,6 +935,7 @@ app.get("/painel", (req, res) => {
   .conv-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #1f1f1f; transition: background 0.15s; }
   .conv-item:hover { background: #1e1e1e; }
   .conv-item.active { background: #1e2a1e; border-left: 3px solid #f0a500; }
+  .conv-item.unread { border-left: 3px solid #f44336; }
   .conv-phone { font-size: 13px; font-weight: 600; color: #fff; }
   .conv-preview { font-size: 12px; color: #666; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .conv-time { font-size: 11px; color: #555; margin-top: 2px; }
@@ -1065,8 +1071,8 @@ async function carregarConversas() {
       return;
     }
     list.innerHTML = data.conversas.map(c =>
-      '<div class="conv-item ' + (c.from === conversaAtiva ? 'active' : '') + '" onclick="abrirConversa(\\'' + c.from + '\\')">' +
-      '<div class="conv-phone">' + formatarTelefone(c.from) + (c.naoLida ? '<span class="conv-badge">' + c.naoLida + '</span>' : '') + '</div>' +
+      '<div class="conv-item ' + (c.from === conversaAtiva ? 'active' : c.naoLida > 0 ? 'unread' : '') + '" onclick="abrirConversa(\\'' + c.from + '\\')">' +
+      '<div class="conv-phone">' + formatarTelefone(c.from) + (c.naoLida > 0 ? '<span class="conv-badge">' + c.naoLida + '</span>' : '') + '</div>' +
       '<div class="conv-preview">' + (c.ultimaMensagem || '') + '</div>' +
       '<div class="conv-time">' + formatarHora(c.ultimaAtividade) + '</div></div>'
     ).join('');
@@ -1081,6 +1087,14 @@ async function abrirConversa(from) {
   document.getElementById('chatPhone').textContent = formatarTelefone(from);
   document.getElementById('chatActions').style.display = 'flex';
   document.getElementById('interventionArea').style.display = 'block';
+
+  // Marca conversa como visualizada agora
+  await fetch(API + '/painel/visualizar', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from })
+  });
+
   await carregarMensagens(from);
   await carregarConversas();
 }
@@ -1237,6 +1251,13 @@ app.get("/painel/mensagens/:from", async (req, res) => {
   catch (e) { res.json({ mensagens: [] }); }
 });
 
+// Marca conversa como visualizada — zera contador de não lidas
+app.post("/painel/visualizar", (req, res) => {
+  const { from } = req.body;
+  if (from) conversasVisualizadas[from] = Date.now();
+  res.json({ ok: true });
+});
+
 app.post("/painel/intervencao", async (req, res) => {
   const { from, texto } = req.body;
   if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
@@ -1285,6 +1306,7 @@ app.post("/painel/followup", async (req, res) => {
 app.post("/painel/resolver", async (req, res) => {
   const { from } = req.body;
   if (conversas[from]) delete conversas[from];
+  if (from) conversasVisualizadas[from] = Date.now();
   res.json({ ok: true });
 });
 
