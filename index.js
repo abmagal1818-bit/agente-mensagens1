@@ -1,7 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
-const { createClient } = require("@supabase/supabase-js");
+const { createClient } = require("@supabase/supabase-js"); console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
+console.log("SUPABASE_KEY:", process.env.SUPABASE_KEY ? "OK" : "VAZIA");
 const app = express();
 app.use(express.json());
 app.use((req, res, next) => {
