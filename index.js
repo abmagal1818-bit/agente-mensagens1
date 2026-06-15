@@ -28,6 +28,21 @@ console.log("SUPABASE_KEY:", SUPABASE_KEY ? "OK" : "VAZIA");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// Testa conexão com Supabase na inicialização
+async function testarSupabase() {
+  try {
+    const { data, error } = await supabase.from("mensagens").select("count").limit(1);
+    if (error) {
+      console.error("[Supabase] ❌ Erro de conexão:", error.message, JSON.stringify(error));
+    } else {
+      console.log("[Supabase] ✅ Conexão OK!");
+    }
+  } catch (e) {
+    console.error("[Supabase] ❌ Exceção na conexão:", e.message);
+  }
+}
+testarSupabase();
+
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
 const conversas = {};
@@ -72,27 +87,39 @@ function clienteEstaEmFluxoTroca(historicoConversa) {
 
 async function salvarMensagem(telefone, tipo, texto) {
   try {
-    await supabase.from("mensagens").insert({
-      telefone, tipo,
+    console.log(`[Supabase] Salvando mensagem: ${telefone} | ${tipo}`);
+    const { data, error } = await supabase.from("mensagens").insert({
+      telefone,
+      tipo,
       texto: String(texto).substring(0, 500)
     });
-    await supabase.from("clientes").upsert({
+    if (error) {
+      console.error("[Supabase] ❌ Erro insert:", error.message, JSON.stringify(error));
+    } else {
+      console.log(`[Supabase] ✅ Mensagem salva: ${telefone} | ${tipo}`);
+    }
+
+    const { error: error2 } = await supabase.from("clientes").upsert({
       telefone,
       ultima_interacao: new Date().toISOString()
     }, { onConflict: "telefone" });
+    if (error2) {
+      console.error("[Supabase] ❌ Erro upsert cliente:", error2.message);
+    }
   } catch (e) {
-    console.error("[Supabase] Erro salvarMensagem:", e.message);
+    console.error("[Supabase] ❌ Exceção salvarMensagem:", e.message);
   }
 }
 
 async function buscarMensagens(telefone) {
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("mensagens")
       .select("*")
       .eq("telefone", telefone)
       .order("criado_em", { ascending: true })
       .limit(100);
+    if (error) console.error("[Supabase] Erro buscarMensagens:", error.message);
     return data || [];
   } catch (e) {
     console.error("[Supabase] Erro buscarMensagens:", e.message);
@@ -102,11 +129,15 @@ async function buscarMensagens(telefone) {
 
 async function listarConversas() {
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("mensagens")
       .select("telefone, texto, tipo, criado_em")
       .order("criado_em", { ascending: false });
 
+    if (error) {
+      console.error("[Supabase] Erro listarConversas:", error.message);
+      return [];
+    }
     if (!data) return [];
 
     const mapa = {};
@@ -143,7 +174,8 @@ async function listarConversas() {
 
 async function salvarAprendizado(situacao, correcao) {
   try {
-    await supabase.from("aprendizados").insert({ situacao, correcao });
+    const { error } = await supabase.from("aprendizados").insert({ situacao, correcao });
+    if (error) console.error("[Supabase] Erro salvarAprendizado:", error.message);
   } catch (e) {
     console.error("[Supabase] Erro salvarAprendizado:", e.message);
   }
@@ -158,7 +190,6 @@ async function buscarAprendizados() {
       .limit(20);
     return data || [];
   } catch (e) {
-    console.error("[Supabase] Erro buscarAprendizados:", e.message);
     return [];
   }
 }
@@ -179,21 +210,16 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar)
     const agendadoPara = new Date();
     agendadoPara.setDate(agendadoPara.getDate() + diasAguardar);
 
-    await supabase
-      .from("followups")
-      .update({ enviado: true })
-      .eq("telefone", telefone)
-      .eq("enviado", false);
+    await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false);
 
-    await supabase.from("followups").insert({
-      telefone,
-      motivo,
+    const { error } = await supabase.from("followups").insert({
+      telefone, motivo,
       veiculo_interesse: veiculoInteresse,
       agendado_para: agendadoPara.toISOString(),
       enviado: false
     });
-
-    console.log(`[FollowUp] Agendado para ${telefone} em ${diasAguardar} dias — motivo: ${motivo}`);
+    if (error) console.error("[Supabase] Erro agendarFollowUp:", error.message);
+    else console.log(`[FollowUp] Agendado para ${telefone} em ${diasAguardar} dias — motivo: ${motivo}`);
   } catch (e) {
     console.error("[Supabase] Erro agendarFollowUp:", e.message);
   }
@@ -217,10 +243,7 @@ async function detectarLeadFrio(from, text, historicoConversa) {
       "vou dar um retorno", "vou retornar", "depois eu volto",
       "vou conversar com", "deixa eu conversar"
     ];
-    if (frasesPensar.some(f => t.includes(f))) {
-      motivo = "vai_pensar";
-      diasAguardar = 1;
-    }
+    if (frasesPensar.some(f => t.includes(f))) { motivo = "vai_pensar"; diasAguardar = 1; }
 
     const frasesCaro = [
       "tá caro", "está caro", "muito caro", "caro demais",
@@ -228,42 +251,28 @@ async function detectarLeadFrio(from, text, historicoConversa) {
       "tá pesado", "está pesado", "pesado demais",
       "fora do meu orçamento", "acima do meu orçamento",
       "não cabe no bolso", "não tenho esse valor",
-      "não consigo", "não tenho como", "excede meu orçamento",
-      "ultrapassa meu orçamento"
+      "não consigo", "não tenho como", "excede meu orçamento"
     ];
-    if (!motivo && frasesCaro.some(f => t.includes(f))) {
-      motivo = "achou_caro";
-      diasAguardar = 3;
-    }
+    if (!motivo && frasesCaro.some(f => t.includes(f))) { motivo = "achou_caro"; diasAguardar = 3; }
 
     const frasesAvaliacao = [
       "avaliação baixa", "avaliacao baixa", "pouco pelo meu",
       "esperava mais", "vale mais", "não compensa",
-      "abaixo do esperado", "não gostei da avaliação",
-      "achei pouco", "muito pouco", "não é justo"
+      "abaixo do esperado", "achei pouco", "muito pouco"
     ];
-    if (!motivo && frasesAvaliacao.some(f => t.includes(f))) {
-      motivo = "avaliacao_baixa";
-      diasAguardar = 5;
-    }
+    if (!motivo && frasesAvaliacao.some(f => t.includes(f))) { motivo = "avaliacao_baixa"; diasAguardar = 5; }
 
     const frasesSemInteresse = [
       "não tenho interesse", "nao tenho interesse",
       "desisti", "não quero mais", "nao quero mais",
-      "mudei de ideia", "não vou mais", "nao vou mais",
-      "cancelar", "esquece", "deixa pra lá", "deixa pra la"
+      "mudei de ideia", "cancelar", "esquece", "deixa pra lá"
     ];
-    if (!motivo && frasesSemInteresse.some(f => t.includes(f))) {
-      motivo = "sem_interesse";
-      diasAguardar = 7;
-    }
+    if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; diasAguardar = 7; }
 
     if (!motivo) return;
 
     const veiculoMatch = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
-    const veiculoInteresse = veiculoMatch ? veiculoMatch[0] : null;
-
-    await agendarFollowUp(from, motivo, veiculoInteresse, diasAguardar);
+    await agendarFollowUp(from, motivo, veiculoMatch ? veiculoMatch[0] : null, diasAguardar);
   } catch (e) {
     console.error("[FollowUp] Erro detectarLeadFrio:", e.message);
   }
@@ -273,26 +282,15 @@ async function verificarClientesSumidos() {
   try {
     const agora = Date.now();
     const vintequatroHoras = 24 * 60 * 60 * 1000;
-
     for (const [telefone, ultimaMensagem] of Object.entries(ultimaMensagemCliente)) {
       if (agora - ultimaMensagem > vintequatroHoras) {
-        const { data } = await supabase
-          .from("followups")
-          .select("id")
-          .eq("telefone", telefone)
-          .eq("enviado", false)
-          .limit(1);
-
+        const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
         if (!data || data.length === 0) {
           const historico = conversas[telefone] || [];
-          const veiculoMatch = historico
-            .map(m => m.content || "").join(" ").toLowerCase()
+          const veiculoMatch = historico.map(m => m.content || "").join(" ").toLowerCase()
             .match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
-
           await agendarFollowUp(telefone, "sumiu", veiculoMatch ? veiculoMatch[0] : null, 5);
-          console.log(`[FollowUp] Cliente sumido: ${telefone}`);
         }
-
         delete ultimaMensagemCliente[telefone];
       }
     }
@@ -307,21 +305,15 @@ async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
     const prompts = {
-      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas em Porto Alegre. Um cliente estava interessado em ${veiculo} mas disse que ia pensar ou consultar alguém. Crie uma mensagem curta, natural e calorosa de follow-up para reativar o interesse, sem pressionar. Máximo 3 linhas.`,
-      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro ou fora do orçamento. Crie uma mensagem curta e empática perguntando qual seria o valor de parcela ideal pra ele, para tentar adaptar a proposta. Máximo 3 linhas.`,
-      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação do carro na troca. Crie uma mensagem curta e empática reforçando que a avaliação presencial pode surpreender positivamente. Máximo 3 linhas.`,
-      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha mais interesse. Crie uma mensagem muito leve e não invasiva perguntando se surgiu alguma novidade ou se posso ajudar de outra forma. Máximo 2 linhas.`,
-      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Um cliente que estava interessado em ${veiculo} parou de responder. Crie uma mensagem curta e natural para retomar o contato, sem pressionar. Máximo 2 linhas.`
+      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas em Porto Alegre. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta e calorosa de follow-up, sem pressionar. Máximo 3 linhas.`,
+      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Crie uma mensagem curta perguntando qual seria o valor de parcela ideal. Máximo 3 linhas.`,
+      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação na troca. Reforce que a avaliação presencial pode surpreender. Máximo 3 linhas.`,
+      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha interesse. Mensagem muito leve perguntando se posso ajudar. Máximo 2 linhas.`,
+      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Um cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar contato. Máximo 2 linhas.`
     };
-
-    const prompt = prompts[followup.motivo] || prompts.vai_pensar;
     const res = await axios.post(
       "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 200,
-        messages: [{ role: "user", content: prompt }]
-      },
+      { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
@@ -333,23 +325,14 @@ async function gerarMensagemFollowUp(followup) {
 
 async function processarFollowUpsPendentes() {
   try {
-    const agora = new Date().toISOString();
-    const { data: followups } = await supabase
-      .from("followups")
-      .select("*")
-      .eq("enviado", false)
-      .lte("agendado_para", agora);
-
+    const { data: followups } = await supabase.from("followups").select("*").eq("enviado", false).lte("agendado_para", new Date().toISOString());
     if (!followups || followups.length === 0) return;
     console.log(`[FollowUp] ${followups.length} follow-up(s) para enviar`);
-
     for (const followup of followups) {
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
-
       try {
-        await axios.post(
-          `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
           { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
         );
@@ -360,7 +343,7 @@ async function processarFollowUpsPendentes() {
         console.log(`[FollowUp] ✅ Enviado para ${followup.telefone}`);
         await notificarAugusto(followup.telefone, `[FollowUp automático]: ${mensagem}`, false);
       } catch (e) {
-        console.error(`[FollowUp] Erro ao enviar para ${followup.telefone}:`, e.message);
+        console.error(`[FollowUp] Erro ao enviar:`, e.message);
       }
     }
   } catch (e) {
@@ -372,28 +355,23 @@ setInterval(processarFollowUpsPendentes, 30 * 60 * 1000);
 processarFollowUpsPendentes();
 
 // ─────────────────────────────────────────────
-// NOTIFICAÇÃO PARA AUGUSTO
+// NOTIFICAÇÕES
 // ─────────────────────────────────────────────
 
 async function notificarAugusto(from, texto, primeiraVez = false) {
   const agora = Date.now();
   const ultima = ultimaNotificacao[from] || 0;
-  const trintaMinutos = 30 * 60 * 1000;
-  if (!primeiraVez && agora - ultima < trintaMinutos) return;
+  if (!primeiraVez && agora - ultima < 30 * 60 * 1000) return;
   ultimaNotificacao[from] = agora;
 
   const numero = from.replace(/\D/g, "");
-  const formatado = numero.length >= 12
-    ? `+${numero.slice(0, 2)} (${numero.slice(2, 4)}) ${numero.slice(4, 9)}-${numero.slice(9)}`
-    : from;
-
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
   const emoji = primeiraVez ? "🆕" : "📩";
   const titulo = primeiraVez ? "Novo cliente na Sarah" : "Mensagem na Sarah";
   const mensagem = `${emoji} *${titulo}*\nNúmero: ${formatado}\nMensagem: "${String(texto).substring(0, 100)}"\n\nAcesse o painel: https://agente-mensagens1.onrender.com/painel`;
 
   try {
-    await axios.post(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
@@ -403,29 +381,23 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   }
 }
 
-// Notifica Augusto sobre interesse em carro não disponível
 async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
   const numero = from.replace(/\D/g, "");
-  const formatado = numero.length >= 12
-    ? `+${numero.slice(0, 2)} (${numero.slice(2, 4)}) ${numero.slice(4, 9)}-${numero.slice(9)}`
-    : from;
-
-  const mensagem = `🔍 *Cliente buscando carro não disponível*\n\nCliente: ${formatado}\nCarro de interesse: *${modeloBuscado}*\n${infoCliente ? `Detalhes: ${infoCliente}` : ""}\n\nConsidere buscar esse veículo para o cliente!`;
-
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
+  const mensagem = `🔍 *Cliente buscando carro não disponível*\n\nCliente: ${formatado}\nCarro de interesse: *${modeloBuscado}*\n${infoCliente ? `Detalhes: ${infoCliente}` : ""}\n\nConsidere buscar esse veículo!`;
   try {
-    await axios.post(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
-    console.log(`[Notificação] ✅ Carro não disponível notificado: ${modeloBuscado}`);
+    console.log(`[Notificação] ✅ Carro não disponível: ${modeloBuscado}`);
   } catch (e) {
     console.error(`[Notificação] Erro carro não disponível:`, e.message);
   }
 }
 
 // ─────────────────────────────────────────────
-// INSTAGRAM — SINCRONIZAÇÃO A CADA 30 MINUTOS
+// INSTAGRAM
 // ─────────────────────────────────────────────
 
 async function buscarEstoqueInstagram() {
@@ -434,28 +406,23 @@ async function buscarEstoqueInstagram() {
     const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media?fields=id,caption,media_type,media_url,children{media_url}&limit=50&access_token=${INSTAGRAM_TOKEN}`;
     const res = await axios.get(url);
     const posts = res.data.data || [];
-
     const veiculos = [];
     for (const post of posts) {
       const caption = limparTexto(post.caption || "");
       if (!caption.includes("R$")) continue;
-
       let fotos = [];
       if (post.media_type === "CAROUSEL_ALBUM" && post.children) {
         fotos = post.children.data.map(c => c.media_url).filter(Boolean);
       } else if (post.media_url) {
         fotos = [post.media_url];
       }
-
       const precoMatch = caption.match(/R\$\s*([\d.,]+)/);
       const kmMatch = caption.match(/([\d.,]+)\s*km/i);
       const anoMatch = caption.match(/(\d{4})\/\d{4}|(\d{4})/);
       const linhas = caption.split("\n").filter(l => l.trim());
-      const primeiraLinha = linhas[0] || "";
-
       veiculos.push({
         id: post.id,
-        modelo: limparTexto(primeiraLinha).replace(/[🚗🚙🏎️]/g, "").trim(),
+        modelo: limparTexto(linhas[0] || "").replace(/[🚗🚙🏎️]/g, "").trim(),
         ano: anoMatch ? (anoMatch[1] || anoMatch[2]) : "",
         km: kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
         preco: precoMatch ? parseFloat(precoMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
@@ -463,7 +430,6 @@ async function buscarEstoqueInstagram() {
         atualizadoEm: new Date().toISOString(),
       });
     }
-
     console.log(`[Instagram] ✅ ${veiculos.length} veículos extraídos`);
     return veiculos;
   } catch (e) {
@@ -486,7 +452,6 @@ async function sincronizarEstoque() {
 }
 
 sincronizarEstoque();
-// ✅ Sincroniza a cada 30 minutos em vez de 6 horas
 setInterval(sincronizarEstoque, 30 * 60 * 1000);
 
 // ─────────────────────────────────────────────
@@ -502,30 +467,15 @@ async function getMarcasFipe() {
 
 async function extrairVeiculoParaTroca(textos) {
   try {
-    const texto = textos.join(" ");
-    const res = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 150,
-        messages: [{
-          role: "user",
-          content: `Analise esse texto de conversa e extraia o veículo que o cliente quer VENDER ou DAR NA TROCA (não o que ele quer comprar).
-Responda APENAS em JSON válido: {"marca": "...", "modelo": "...", "ano": "..."}
-Use nomes simples em minúsculo. Se não tiver informação suficiente, coloque null.
-
-Exemplos:
-- "tenho um gol 2012" → {"marca": "volkswagen", "modelo": "gol", "ano": "2012"}
-- "santa fé 2012" → {"marca": "hyundai", "modelo": "santa fe", "ano": "2012"}
-- "quero comprar um jetta" → {"marca": null, "modelo": null, "ano": null}
-
-Texto: "${texto}"`
-        }]
-      },
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
+      { model: "claude-sonnet-4-5", max_tokens: 150, messages: [{ role: "user", content: `Analise esse texto e extraia o veículo que o cliente quer VENDER ou DAR NA TROCA.
+Responda APENAS em JSON: {"marca": "...", "modelo": "...", "ano": "..."}
+Use nomes simples em minúsculo. Se não encontrar, coloque null.
+Exemplos: "tenho um gol 2012" → {"marca": "volkswagen", "modelo": "gol", "ano": "2012"}
+Texto: "${textos.join(" ")}"` }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-    const resposta = res.data.content[0].text.trim();
-    const jsonMatch = resposta.match(/\{[^}]+\}/);
+    const jsonMatch = res.data.content[0].text.trim().match(/\{[^}]+\}/);
     if (!jsonMatch) return { marca: null, modelo: null, ano: null };
     return JSON.parse(jsonMatch[0]);
   } catch (e) {
@@ -539,16 +489,12 @@ async function consultarFipe(marca, modelo, ano) {
   if (fipeCache[chave]) return fipeCache[chave];
   try {
     const marcas = await getMarcasFipe();
-    const marcaFipe = marcas.find(m =>
-      m.nome.toLowerCase().includes(marca.toLowerCase()) ||
-      marca.toLowerCase().includes(m.nome.toLowerCase().split(" ")[0])
-    );
+    const marcaFipe = marcas.find(m => m.nome.toLowerCase().includes(marca.toLowerCase()) || marca.toLowerCase().includes(m.nome.toLowerCase().split(" ")[0]));
     if (!marcaFipe) return null;
     const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`);
-    const primeirapalavra = modelo.toLowerCase().split(" ")[0];
-    const modelosCandidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(primeirapalavra));
-    if (modelosCandidatos.length === 0) return null;
-    for (const candidato of modelosCandidatos) {
+    const candidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(modelo.toLowerCase().split(" ")[0]));
+    if (!candidatos.length) return null;
+    for (const candidato of candidatos) {
       const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos`);
       const anoFipe = anosRes.data.find(a => a.nome.includes(ano.toString()) && !a.nome.includes("32000"));
       if (anoFipe) {
@@ -588,9 +534,7 @@ async function transcreverAudio(mediaId) {
     formData.append("language", "pt");
     const res = await axios.post("https://api.groq.com/openai/v1/audio/transcriptions", formData, { headers: { Authorization: `Bearer ${GROQ_API_KEY}`, ...formData.getHeaders() } });
     return res.data.text;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 async function analisarImagem(mediaId, caption) {
@@ -599,25 +543,15 @@ async function analisarImagem(mediaId, caption) {
     const imageRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
     const base64Image = Buffer.from(imageRes.data).toString("base64");
     const mimeType = mediaRes.data.mime_type || "image/jpeg";
-    const res = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 200,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: mimeType, data: base64Image } },
-            { type: "text", text: `Você é um avaliador de veículos. Analise essa foto e descreva em 2 linhas: estado geral, pontos positivos e pontos de atenção. ${caption ? `Contexto: ${caption}` : ""}` }
-          ]
-        }]
-      },
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
+      { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: mimeType, data: base64Image } },
+        { type: "text", text: `Avaliador de veículos. Descreva em 2 linhas: estado geral, pontos positivos e de atenção. ${caption ? `Contexto: ${caption}` : ""}` }
+      ]}] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 // ─────────────────────────────────────────────
@@ -626,57 +560,31 @@ async function analisarImagem(mediaId, caption) {
 
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
-
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
 
-  const ultimaResposta = (historicoConversa || [])
-    .filter(m => m.role === "assistant")
-    .slice(-1)[0]?.content || "";
-
+  const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
   const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
-  if (confirmacoesSimples.includes(t) && ultimaResposta.toLowerCase().includes("foto")) {
-    return true;
-  }
+  if (confirmacoesSimples.includes(t) && ultimaResposta.toLowerCase().includes("foto")) return true;
 
-  const naoEPedido = [
-    "te mando", "vou mandar", "vou te mandar", "ja mando", "já mando",
-    "mando agora", "mando foto", "mandando foto", "vou enviar",
-    "to mandando", "tô mandando", "estou mandando", "to enviando"
-  ];
+  const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mando foto", "mandando foto", "vou enviar", "to mandando", "tô mandando", "estou mandando", "to enviando"];
   if (naoEPedido.some(p => t.includes(p))) return false;
 
-  const ePedido = [
-    "tem foto", "tem fotos", "manda foto", "manda as foto",
-    "pode mandar foto", "me manda foto", "me passa foto",
-    "quero ver foto", "quero ver as foto", "tem imagem",
-    "me mostra", "posso ver", "ver o interior", "ver o exterior",
-    "ver por dentro", "ver por fora", "foto dele", "fotos dele",
-    "vai mandar as fotos", "vai mandar foto", "as fotos"
-  ];
+  const ePedido = ["tem foto", "tem fotos", "manda foto", "manda as foto", "pode mandar foto", "me manda foto", "me passa foto", "quero ver foto", "quero ver as foto", "tem imagem", "me mostra", "posso ver", "ver o interior", "ver o exterior", "ver por dentro", "ver por fora", "foto dele", "fotos dele", "vai mandar as fotos", "vai mandar foto", "as fotos"];
   if (ePedido.some(p => t.includes(p))) return true;
 
   return false;
 }
 
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
-  const contexto = [texto, ...(historicoConversa || [])
-    .filter(m => m.role === "user").slice(-8).map(m => m.content)
-  ].join(" ").toLowerCase();
-
-  const ultimaResposta = (historicoConversa || [])
-    .filter(m => m.role === "assistant")
-    .slice(-1)[0]?.content || "";
-
-  const contextoCompleto = contexto + " " + ultimaResposta.toLowerCase();
+  const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
+  const contextoCompleto = [texto, ...(historicoConversa || []).filter(m => m.role === "user").slice(-8).map(m => m.content)].join(" ").toLowerCase() + " " + ultimaResposta.toLowerCase();
 
   let melhorMatch = null;
   let melhorScore = 0;
-
   for (const v of estoque) {
     const modelo = limparTexto(v.modelo || "").toLowerCase();
     const palavras = modelo.split(/\s+/).filter(p => p.length > 2);
-    let score = 0;
-    for (const p of palavras) { if (contextoCompleto.includes(p)) score++; }
+    let score = palavras.filter(p => contextoCompleto.includes(p)).length;
     if (v.ano && contextoCompleto.includes(String(v.ano))) score += 2;
     if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
   }
@@ -685,58 +593,39 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
 
 async function enviarFotosVeiculo(to, veiculo) {
   const fotos = (veiculo.fotos || []).slice(0, 5);
-  if (fotos.length === 0) return false;
+  if (!fotos.length) return false;
   for (const url of fotos) {
     try {
-      await axios.post(
-        `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to, type: "image", image: { link: url } },
         { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
       );
       await new Promise(r => setTimeout(r, 600));
-    } catch (e) {
-      console.error(`Erro ao enviar foto: ${e.message}`);
-    }
+    } catch (e) { console.error(`Erro foto: ${e.message}`); }
   }
   return true;
 }
 
 // ─────────────────────────────────────────────
-// DETECTA MODELO BUSCADO PELO CLIENTE
+// DETECTA MODELO BUSCADO
 // ─────────────────────────────────────────────
 
 async function extrairModeloBuscado(textos) {
   try {
-    const texto = textos.join(" ");
-    const res = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 100,
-        messages: [{
-          role: "user",
-          content: `Analise o texto e extraia o modelo de carro que o cliente quer COMPRAR ou está procurando.
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
+      { model: "claude-sonnet-4-5", max_tokens: 100, messages: [{ role: "user", content: `Extraia o modelo de carro que o cliente quer COMPRAR.
 Responda APENAS em JSON: {"modelo": "...", "ano": "..."}
 Se não encontrar, coloque null.
-
-Exemplos:
-- "quero uma renegade 2020" → {"modelo": "renegade", "ano": "2020"}
-- "procuro um corolla" → {"modelo": "corolla", "ano": null}
-- "tenho um gol pra vender" → {"modelo": null, "ano": null}
-
-Texto: "${texto}"`
-        }]
-      },
+Exemplos: "quero uma renegade 2020" → {"modelo": "renegade", "ano": "2020"}
+"tenho um gol pra vender" → {"modelo": null, "ano": null}
+Texto: "${textos.join(" ")}"` }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-    const resposta = res.data.content[0].text.trim();
-    const jsonMatch = resposta.match(/\{[^}]+\}/);
+    const jsonMatch = res.data.content[0].text.trim().match(/\{[^}]+\}/);
     if (!jsonMatch) return null;
     const json = JSON.parse(jsonMatch[0]);
     return json.modelo ? json : null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 // ─────────────────────────────────────────────
@@ -744,13 +633,8 @@ Texto: "${texto}"`
 // ─────────────────────────────────────────────
 
 function formatarEstoque() {
-  if (estoqueAtual.length === 0) return "Estoque sendo carregado.";
-  return estoqueAtual.map(v => {
-    const modelo = limparTexto(v.modelo || "");
-    const km = Number(v.km || 0).toLocaleString("pt-BR");
-    const preco = Number(v.preco || 0).toLocaleString("pt-BR");
-    return `${modelo} ${v.ano || ""} - ${km} km - R$ ${preco}`;
-  }).join("\n");
+  if (!estoqueAtual.length) return "Estoque sendo carregado.";
+  return estoqueAtual.map(v => `${limparTexto(v.modelo || "")} ${v.ano || ""} - ${Number(v.km || 0).toLocaleString("pt-BR")} km - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n");
 }
 
 const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -775,100 +659,75 @@ REGRAS DE PREÇO:
 
 QUANDO CLIENTE PEDE CARRO QUE NÃO ESTÁ NO ESTOQUE:
 ${carroNaoDisponivel ?
-    `⚠️ O cliente está procurando: ${carroNaoDisponivel}
-Este modelo NÃO está disponível no momento.
-NUNCA diga simplesmente "não temos". Siga este fluxo:
-1. Diga que esse modelo não está disponível no momento
-2. Pergunte mais detalhes para encontrar algo similar ou avisá-lo quando chegar:
+    `⚠️ Cliente procura: ${carroNaoDisponivel} — NÃO disponível no momento.
+NUNCA diga apenas "não temos". Siga este fluxo:
+1. Informe que esse modelo não está disponível no momento
+2. Pergunte detalhes para avisar quando chegar ou encontrar similar:
    - "Que ano você está procurando?"
-   - "Qual sua faixa de preço?"
+   - "Qual sua faixa de preço ou valor de parcela?"
    - "Tem carro para dar na troca?"
-3. Ofereça alternativas do estoque APENAS se tiver algo similar
-4. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui!"
-O sistema já notificou o consultor sobre o interesse deste cliente.` :
-    `Se cliente pedir carro não disponível: qualifique o cliente (ano, versão, orçamento, troca) antes de oferecer alternativas. Ofereça avisar quando chegar.`
-  }
+3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
+4. Só ofereça alternativas do estoque se tiver algo REALMENTE similar` :
+    `Se cliente pedir carro não disponível: qualifique (ano, orçamento, troca) antes de oferecer alternativas. Ofereça avisar quando chegar.`}
 
 FOTOS DOS VEÍCULOS:
-- Quando o sistema confirmar que fotos foram enviadas, diga: "Mandei as fotos pra você! O que achou? 😊"
-- NUNCA escreva tags XML
-- NUNCA diga que enviou fotos se o sistema não confirmou
-- Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
+- Quando sistema confirmar envio, diga: "Mandei as fotos pra você! O que achou? 😊"
+- NUNCA diga que enviou sem confirmação do sistema
+- NUNCA use tags XML
 
 PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
 
 FLUXO DE AVALIAÇÃO DE TROCA:
-Quando cliente mencionar veículo para troca, NUNCA passe valor imediatamente.
-
-ETAPA 1 — Conhecer o carro:
-- Quilometragem atual?
-- Estado geral (pintura, mecânica, pneus)?
-- Revisões em dia?
-- Pode mandar fotos? 📸
-
-ETAPA 2 — Quando cliente mandar fotos:
-- Agradeça e comente positivamente
-
+ETAPA 1 — Conhecer o carro: km, estado geral, revisões, fotos 📸
+ETAPA 2 — Fotos recebidas: agradeça e comente positivamente
 ETAPA 3 — Só após ter km, estado e fotos:
 ${fipeInfo ? (() => {
     const v = calcularValoresTroca(fipeInfo.Valor);
-    return `✅ FIPE consultada: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor}
-Faixa de avaliação: R$ ${v.minimoFormatado} a R$ ${v.maximoFormatado}
-Diga: "Com base no que você me passou, conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!"
+    return `✅ FIPE: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor}
+Faixa: R$ ${v.minimoFormatado} a R$ ${v.maximoFormatado}
+Diga: "Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!"
 NÃO mencione FIPE, percentuais ou descontos.`;
   })() : `⚠️ FIPE não consultada — NUNCA invente valores.`}
 
-QUANDO CLIENTE ACHAR CARO OU FORA DO ORÇAMENTO:
-NUNCA encerre. Pergunte: "Qual seria o valor de parcela que cabe no seu orçamento?"
-Com o valor informado, tente adaptar: prazo maior, entrada maior, ou veículo similar mais acessível.
+QUANDO CLIENTE ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
+QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
 
-QUANDO CLIENTE DISSER "VOU PENSAR" OU CONSULTAR ALGUÉM:
-NUNCA encerre imediatamente. Pergunte o que ficou na dúvida.
-Se insistir: "Sem problema! 😊 Fico à disposição. O carro pode sair rápido, avise quando puder!"
-
-SIMULAÇÃO DE FINANCIAMENTO:
-Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
-Apresente apenas o valor da parcela.
-NUNCA pergunte sobre financiamento sem o cliente mencionar.
-
-FINANCIAMENTO ACIMA DO PREÇO (TROCO):
-Banco financia até o valor FIPE. Calcule: saldo troca = avaliação - dívida.
+SIMULAÇÃO: Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1). Só simule se cliente pedir.
+TROCO: Banco financia até FIPE. Valor financiado = preço + troco - saldo troca.
 
 REGRAS:
 - Primeira mensagem: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
-- Demais mensagens: direto ao assunto, máximo 4 linhas
-- Emojis com moderação 🚗
+- Máximo 4 linhas, emojis com moderação 🚗
 - Humano: (51) 99364-2476
-- NUNCA invente links, URLs ou informações de estoque
-- NUNCA use tags XML${aprendizadosExtra}`;
+- NUNCA invente links, informações ou use tags XML${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
-// PROCESSAMENTO DE MENSAGENS
+// PROCESSAMENTO
 // ─────────────────────────────────────────────
 
 async function processarMensagem(from, text) {
   if (!text || typeof text !== "string") return;
 
   ultimaMensagemCliente[from] = Date.now();
-
   const primeiraVez = !ultimaNotificacao[from];
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
-  salvarMensagem(from, "client", text).catch(() => {});
+
+  // Salva no Supabase
+  await salvarMensagem(from, "client", text);
   notificarAugusto(from, text, primeiraVez).catch(() => {});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
 
-  // Detecta se cliente busca carro não disponível no estoque
+  // Detecta carro não disponível
   let carroNaoDisponivel = null;
-  const todosTextosCliente = conversas[from].filter(m => m.role === "user").map(m => m.content);
-  const modeloBuscado = await extrairModeloBuscado(todosTextosCliente);
+  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
+  const modeloBuscado = await extrairModeloBuscado(todosTextos);
 
   if (modeloBuscado) {
     const modeloNome = modeloBuscado.modelo.toLowerCase();
     const anoNome = modeloBuscado.ano;
-
     const encontrado = estoqueAtual.some(v => {
       const modeloEstoque = limparTexto(v.modelo || "").toLowerCase();
       const anoOk = !anoNome || String(v.ano) === String(anoNome);
@@ -878,69 +737,52 @@ async function processarMensagem(from, text) {
     if (!encontrado) {
       const descricao = `${modeloBuscado.modelo}${anoNome ? ` ${anoNome}` : ""}`;
       carroNaoDisponivel = descricao;
-
-      // Notifica Augusto apenas uma vez por conversa
       const jaNotificou = conversas[from].some(m => m.content?.includes("[Sistema: cliente buscou"));
       if (!jaNotificou) {
-        const infoCliente = todosTextosCliente.slice(-3).join(" | ");
-        notificarCarroNaoDisponivel(from, descricao, infoCliente).catch(() => {});
-        conversas[from].push({
-          role: "user",
-          content: `[Sistema: cliente buscou ${descricao} que não está no estoque. Augusto foi notificado. Qualifique o cliente.]`
-        });
+        notificarCarroNaoDisponivel(from, descricao, todosTextos.slice(-3).join(" | ")).catch(() => {});
+        conversas[from].push({ role: "user", content: `[Sistema: cliente buscou ${descricao} que não está no estoque. Augusto foi notificado. Qualifique o cliente.]` });
       }
     }
   }
 
-  // Detecta pedido de fotos do estoque
+  // Fotos do estoque
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
-  const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
-  const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos enviadas");
+  const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
 
   if (ehTextoNormal && !jaEnviouFotos && clienteEstaPedindoFotosDoEstoque(text, conversas[from])) {
     const veiculo = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-    if (veiculo && veiculo.fotos && veiculo.fotos.length > 0) {
+    if (veiculo && veiculo.fotos?.length > 0) {
       console.log(`[Fotos] Enviando ${veiculo.fotos.length} fotos do ${veiculo.modelo}`);
       await enviarFotosVeiculo(from, veiculo);
-      conversas[from].push({
-        role: "user",
-        content: `[Sistema: fotos enviadas automaticamente do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que o cliente achou.]`
-      });
+      conversas[from].push({ role: "user", content: `[Sistema: fotos enviadas automaticamente do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que o cliente achou.]` });
     }
   }
 
-  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextosCliente);
+  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextos);
   let fipeInfo = null;
   if (marca && modelo && ano) fipeInfo = await consultarFipe(marca, modelo, ano);
 
-  const claude = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-5",
-      max_tokens: 500,
-      system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(() => ""), carroNaoDisponivel),
-      messages: conversas[from]
-    },
+  const claude = await axios.post("https://api.anthropic.com/v1/messages",
+    { model: "claude-sonnet-4-5", max_tokens: 500, system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(() => ""), carroNaoDisponivel), messages: conversas[from] },
     { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
   );
 
   const reply = claude.data.content[0].text;
   conversas[from].push({ role: "assistant", content: reply });
 
-  await axios.post(
-    `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+  await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
     { messaging_product: "whatsapp", to: from, text: { body: reply } },
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
   );
 
   console.log(`Resposta para ${from}: ${reply}`);
-  salvarMensagem(from, "sara", reply).catch(() => {});
+  await salvarMensagem(from, "sara", reply);
 }
 
 async function processarFotosAgrupadas(from, analises) {
   const textoAgrupado = analises.length === 1
     ? `[Cliente enviou foto do veículo. Análise: ${analises[0]}]`
-    : `[Cliente enviou ${analises.length} fotos do veículo. Análises:\n${analises.map((a, i) => `Foto ${i + 1}: ${a}`).join("\n")}]`;
+    : `[Cliente enviou ${analises.length} fotos. Análises:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
   await processarMensagem(from, textoAgrupado);
 }
 
@@ -950,12 +792,22 @@ async function processarFotosAgrupadas(from, analises) {
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
 app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
-app.get("/sincronizar", async (req, res) => { res.send("Sincronização iniciada!"); await sincronizarEstoque(); });
+app.get("/sincronizar", async (req, res) => { res.send("Iniciado!"); await sincronizarEstoque(); });
+
+app.get("/testar-supabase", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("mensagens").select("count").limit(1);
+    if (error) return res.json({ ok: false, erro: error.message, detalhe: JSON.stringify(error) });
+    const { data: total } = await supabase.from("mensagens").select("*", { count: "exact", head: true });
+    res.json({ ok: true, mensagem: "Supabase conectado!", total: total });
+  } catch (e) {
+    res.json({ ok: false, erro: e.message });
+  }
+});
 
 app.get("/testar-notificacao", async (req, res) => {
   try {
-    const resultado = await axios.post(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    const resultado = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: "✅ Teste de notificação da Sarah funcionando!" } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
@@ -969,17 +821,12 @@ app.get("/followups", async (req, res) => {
   try {
     const { data } = await supabase.from("followups").select("*").order("criado_em", { ascending: false }).limit(50);
     res.json({ followups: data || [] });
-  } catch (e) {
-    res.json({ followups: [] });
-  }
+  } catch (e) { res.json({ followups: [] }); }
 });
 
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    res.send(req.query["hub.challenge"]);
-  } else {
-    res.sendStatus(403);
-  }
+  if (req.query["hub.verify_token"] === VERIFY_TOKEN) res.send(req.query["hub.challenge"]);
+  else res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
@@ -1010,8 +857,7 @@ app.post("/webhook", async (req, res) => {
           console.log(`Áudio transcrito de ${from}: ${texto}`);
           await processarMensagem(from, `[Áudio]: ${texto}`);
         } else {
-          await axios.post(
-            `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
             { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
             { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
           );
@@ -1020,26 +866,19 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "image") {
         console.log(`Imagem recebida de ${from}`);
         const caption = msg.image?.caption || "";
-
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
-
         const analise = await analisarImagem(msg.image.id, caption);
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (analise) filaFotos[from].analises.push(analise);
-
         filaFotos[from].timer = setTimeout(async () => {
           if (!filaFotos[from]) return;
           const analises = [...filaFotos[from].analises];
           delete filaFotos[from];
-          if (analises.length > 0) {
-            await processarFotosAgrupadas(from, analises);
-          } else {
-            await processarMensagem(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
-          }
+          if (analises.length > 0) await processarFotosAgrupadas(from, analises);
+          else await processarMensagem(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
         }, 3000);
       }
-
     } catch (e) {
       console.error("Erro:", e.message);
       if (e.response) console.error("Detalhe:", JSON.stringify(e.response.data));
@@ -1054,9 +893,7 @@ app.get("/registrar", async (req, res) => {
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
     res.send("Registrado! " + JSON.stringify(result.data));
-  } catch (e) {
-    res.send("Erro: " + JSON.stringify(e.response?.data));
-  }
+  } catch (e) { res.send("Erro: " + JSON.stringify(e.response?.data)); }
 });
 
 app.get("/assinar-webhook", async (req, res) => {
@@ -1065,9 +902,7 @@ app.get("/assinar-webhook", async (req, res) => {
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
     );
     res.send("Assinado! " + JSON.stringify(result.data));
-  } catch (e) {
-    res.send("Erro: " + JSON.stringify(e.response?.data));
-  }
+  } catch (e) { res.send("Erro: " + JSON.stringify(e.response?.data)); }
 });
 
 // ─────────────────────────────────────────────
@@ -1085,8 +920,7 @@ app.get("/painel", (req, res) => {
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
   header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
-  header h1 { font-size: 18px; color: #fff; }
-  header h1 span { color: #f0a500; }
+  header h1 { font-size: 18px; color: #fff; } header h1 span { color: #f0a500; }
   .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #888; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
@@ -1108,14 +942,11 @@ app.get("/painel", (req, res) => {
   .chat-actions { display: flex; gap: 8px; }
   .btn { padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
   .btn:hover { opacity: 0.85; }
-  .btn-primary { background: #f0a500; color: #000; }
-  .btn-danger { background: #f44336; color: #fff; }
-  .btn-secondary { background: #333; color: #fff; }
-  .btn-followup { background: #1565c0; color: #fff; }
+  .btn-primary { background: #f0a500; color: #000; } .btn-danger { background: #f44336; color: #fff; }
+  .btn-secondary { background: #333; color: #fff; } .btn-followup { background: #1565c0; color: #fff; }
   .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 75%; }
-  .msg.client { align-self: flex-start; }
-  .msg.sara, .msg.intervencao { align-self: flex-end; }
+  .msg.client { align-self: flex-start; } .msg.sara, .msg.intervencao { align-self: flex-end; }
   .msg-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
   .msg.client .msg-bubble { background: #2a2a2a; color: #e0e0e0; border-bottom-left-radius: 3px; }
   .msg.sara .msg-bubble { background: #1a3a1a; color: #b8e6b8; border-bottom-right-radius: 3px; }
@@ -1123,9 +954,7 @@ app.get("/painel", (req, res) => {
   .msg-meta { font-size: 11px; color: #555; margin-top: 3px; }
   .msg.sara .msg-meta, .msg.intervencao .msg-meta { text-align: right; }
   .msg-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-  .msg.client .msg-label { color: #666; }
-  .msg.sara .msg-label { color: #4a8; text-align: right; }
-  .msg.intervencao .msg-label { color: #f0a500; text-align: right; }
+  .msg.client .msg-label { color: #666; } .msg.sara .msg-label { color: #4a8; text-align: right; } .msg.intervencao .msg-label { color: #f0a500; text-align: right; }
   .intervention { background: #1a1a1a; border-top: 1px solid #2a2a2a; padding: 12px 16px; }
   .intervention-header { font-size: 11px; color: #f0a500; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
   .intervention-input { display: flex; gap: 8px; }
@@ -1137,12 +966,9 @@ app.get("/painel", (req, res) => {
   .tab.active { color: #f0a500; border-bottom: 2px solid #f0a500; }
   .learning-list { flex: 1; overflow-y: auto; padding: 8px; }
   .learning-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #f0a500; }
-  .learning-item .situation { color: #888; margin-bottom: 4px; }
-  .learning-item .correction { color: #b8e6b8; }
+  .learning-item .situation { color: #888; margin-bottom: 4px; } .learning-item .correction { color: #b8e6b8; }
   .followup-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #1565c0; }
-  .followup-item .fu-phone { color: #64b5f6; font-weight: 600; }
-  .followup-item .fu-motivo { color: #888; margin-top: 2px; }
-  .followup-item .fu-data { color: #555; margin-top: 2px; font-size: 11px; }
+  .followup-item .fu-phone { color: #64b5f6; font-weight: 600; } .followup-item .fu-motivo { color: #888; margin-top: 2px; } .followup-item .fu-data { color: #555; margin-top: 2px; font-size: 11px; }
   .learning-count { padding: 8px 16px; font-size: 12px; color: #555; border-top: 1px solid #2a2a2a; }
   .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: #444; }
   .loading { text-align: center; padding: 20px; color: #555; font-size: 13px; }
@@ -1168,9 +994,7 @@ app.get("/painel", (req, res) => {
         <button class="btn btn-danger" onclick="salvarAprendizado()">💡 Aprendizado</button>
       </div>
     </div>
-    <div class="messages" id="messages">
-      <div class="empty-state"><span>Selecione uma conversa</span></div>
-    </div>
+    <div class="messages" id="messages"><div class="empty-state"><span>Selecione uma conversa</span></div></div>
     <div class="intervention" id="interventionArea" style="display:none">
       <div class="intervention-header">⚡ Intervenção — enviado como Sarah</div>
       <div class="intervention-input">
@@ -1239,9 +1063,7 @@ async function carregarConversas() {
       '<div class="conv-time">' + formatarHora(c.ultimaAtividade) + '</div></div>'
     ).join('');
     document.getElementById('statusText').textContent = data.conversas.length + ' conversa(s) ativa(s)';
-  } catch(e) {
-    document.getElementById('statusText').textContent = 'Erro de conexão';
-  }
+  } catch(e) { document.getElementById('statusText').textContent = 'Erro de conexão'; }
 }
 
 async function abrirConversa(from) {
@@ -1249,11 +1071,7 @@ async function abrirConversa(from) {
   document.getElementById('chatPhone').textContent = formatarTelefone(from);
   document.getElementById('chatActions').style.display = 'flex';
   document.getElementById('interventionArea').style.display = 'block';
-  await fetch(API + '/painel/visualizar', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from })
-  });
+  await fetch(API + '/painel/visualizar', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from }) });
   await carregarMensagens(from);
   await carregarConversas();
 }
@@ -1263,15 +1081,12 @@ async function carregarMensagens(from) {
     const res = await fetch(API + '/painel/mensagens/' + from);
     const data = await res.json();
     const msgs = document.getElementById('messages');
-    if (!data.mensagens || data.mensagens.length === 0) {
-      msgs.innerHTML = '<div class="loading">Nenhuma mensagem</div>';
-      return;
-    }
+    if (!data.mensagens || data.mensagens.length === 0) { msgs.innerHTML = '<div class="loading">Nenhuma mensagem</div>'; return; }
     msgs.innerHTML = data.mensagens.map(m =>
       '<div class="msg ' + m.tipo + '">' +
       '<div class="msg-label">' + (m.tipo === 'client' ? '👤 Cliente' : m.tipo === 'sara' ? '🤖 Sarah' : '⚡ Você') + '</div>' +
       '<div class="msg-bubble">' + (m.texto || '').replace(/\\n/g, '<br>') + '</div>' +
-      '<div class="msg-meta">' + formatarHora(m.criado_em || m.timestamp) + '</div></div>'
+      '<div class="msg-meta">' + formatarHora(m.criado_em) + '</div></div>'
     ).join('');
     msgs.scrollTop = msgs.scrollHeight;
   } catch(e) {}
@@ -1281,15 +1096,8 @@ async function enviarIntervencao() {
   if (!conversaAtiva) return;
   const texto = document.getElementById('interventionText').value.trim();
   if (!texto) return;
-  const res = await fetch(API + '/painel/intervencao', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva, texto })
-  });
-  if (res.ok) {
-    document.getElementById('interventionText').value = '';
-    await carregarMensagens(conversaAtiva);
-  }
+  const res = await fetch(API + '/painel/intervencao', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva, texto }) });
+  if (res.ok) { document.getElementById('interventionText').value = ''; await carregarMensagens(conversaAtiva); }
 }
 
 async function agendarFollowUpManual() {
@@ -1298,11 +1106,7 @@ async function agendarFollowUpManual() {
   if (!motivo) return;
   const dias = prompt('Em quantos dias enviar?');
   if (!dias) return;
-  const res = await fetch(API + '/painel/followup', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) })
-  });
+  const res = await fetch(API + '/painel/followup', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) }) });
   if (res.ok) alert('✅ Follow-up agendado para ' + dias + ' dias!');
 }
 
@@ -1312,22 +1116,14 @@ async function salvarAprendizado() {
   if (!situacao) return;
   const correcao = prompt('Como a Sarah deveria responder?');
   if (!correcao) return;
-  await fetch(API + '/painel/aprendizado', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ situacao, correcao })
-  });
+  await fetch(API + '/painel/aprendizado', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ situacao, correcao }) });
   await carregarAprendizados();
   alert('✅ Aprendizado salvo!');
 }
 
 async function marcarResolvido() {
   if (!conversaAtiva) return;
-  await fetch(API + '/painel/resolver', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva })
-  });
+  await fetch(API + '/painel/resolver', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva }) });
   conversaAtiva = null;
   document.getElementById('chatPhone').textContent = 'Selecione uma conversa';
   document.getElementById('chatActions').style.display = 'none';
@@ -1341,13 +1137,8 @@ async function carregarAprendizados() {
     const res = await fetch(API + '/painel/aprendizados');
     const data = await res.json();
     const list = document.getElementById('learningList');
-    if (!data.aprendizados || data.aprendizados.length === 0) {
-      list.innerHTML = '<div class="loading" style="color:#555">Nenhum aprendizado ainda</div>';
-      return;
-    }
-    list.innerHTML = data.aprendizados.map(a =>
-      '<div class="learning-item"><div class="situation">📌 ' + a.situacao + '</div><div class="correction">✓ ' + (a.correcao || '').substring(0,100) + '</div></div>'
-    ).join('');
+    if (!data.aprendizados || data.aprendizados.length === 0) { list.innerHTML = '<div class="loading" style="color:#555">Nenhum aprendizado ainda</div>'; return; }
+    list.innerHTML = data.aprendizados.map(a => '<div class="learning-item"><div class="situation">📌 ' + a.situacao + '</div><div class="correction">✓ ' + (a.correcao || '').substring(0,100) + '</div></div>').join('');
     document.getElementById('learningCount').textContent = data.aprendizados.length + ' aprendizado(s)';
   } catch(e) {}
 }
@@ -1357,26 +1148,14 @@ async function carregarFollowups() {
     const res = await fetch(API + '/followups');
     const data = await res.json();
     const list = document.getElementById('followupList');
-    if (!data.followups || data.followups.length === 0) {
-      list.innerHTML = '<div class="loading" style="color:#555">Nenhum follow-up ainda</div>';
-      return;
-    }
+    if (!data.followups || data.followups.length === 0) { list.innerHTML = '<div class="loading" style="color:#555">Nenhum follow-up ainda</div>'; return; }
     const pendentes = data.followups.filter(f => !f.enviado);
     const enviados = data.followups.filter(f => f.enviado);
     list.innerHTML =
       (pendentes.length > 0 ? '<div style="padding:8px;font-size:11px;color:#f0a500;font-weight:600">PENDENTES (' + pendentes.length + ')</div>' : '') +
-      pendentes.map(f =>
-        '<div class="followup-item">' +
-        '<div class="fu-phone">' + formatarTelefone(f.telefone) + '</div>' +
-        '<div class="fu-motivo">📌 ' + f.motivo + (f.veiculo_interesse ? ' — ' + f.veiculo_interesse : '') + '</div>' +
-        '<div class="fu-data">⏰ ' + formatarData(f.agendado_para) + '</div></div>'
-      ).join('') +
+      pendentes.map(f => '<div class="followup-item"><div class="fu-phone">' + formatarTelefone(f.telefone) + '</div><div class="fu-motivo">📌 ' + f.motivo + (f.veiculo_interesse ? ' — ' + f.veiculo_interesse : '') + '</div><div class="fu-data">⏰ ' + formatarData(f.agendado_para) + '</div></div>').join('') +
       (enviados.length > 0 ? '<div style="padding:8px;font-size:11px;color:#555;font-weight:600">ENVIADOS (' + enviados.length + ')</div>' : '') +
-      enviados.slice(0,5).map(f =>
-        '<div class="followup-item" style="opacity:0.4">' +
-        '<div class="fu-phone">' + formatarTelefone(f.telefone) + ' ✓</div>' +
-        '<div class="fu-motivo">' + f.motivo + '</div></div>'
-      ).join('');
+      enviados.slice(0,5).map(f => '<div class="followup-item" style="opacity:0.4"><div class="fu-phone">' + formatarTelefone(f.telefone) + ' ✓</div><div class="fu-motivo">' + f.motivo + '</div></div>').join('');
     document.getElementById('followupCount').textContent = pendentes.length + ' pendente(s)';
   } catch(e) {}
 }
@@ -1420,8 +1199,7 @@ app.post("/painel/intervencao", async (req, res) => {
   const { from, texto } = req.body;
   if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
   try {
-    await axios.post(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: from, text: { body: texto } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
@@ -1429,20 +1207,14 @@ app.post("/painel/intervencao", async (req, res) => {
     conversas[from].push({ role: "assistant", content: texto });
     await salvarMensagem(from, "intervencao", texto);
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
+  } catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 app.post("/painel/aprendizado", async (req, res) => {
   const { situacao, correcao } = req.body;
   if (!situacao || !correcao) return res.status(400).json({ erro: "Dados inválidos" });
-  try {
-    await salvarAprendizado(situacao, correcao);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
+  try { await salvarAprendizado(situacao, correcao); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 app.get("/painel/aprendizados", async (req, res) => {
@@ -1453,12 +1225,8 @@ app.get("/painel/aprendizados", async (req, res) => {
 app.post("/painel/followup", async (req, res) => {
   const { from, motivo, dias } = req.body;
   if (!from || !motivo || !dias) return res.status(400).json({ erro: "Dados inválidos" });
-  try {
-    await agendarFollowUp(from, motivo, null, dias);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
+  try { await agendarFollowUp(from, motivo, null, dias); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 app.post("/painel/resolver", async (req, res) => {
