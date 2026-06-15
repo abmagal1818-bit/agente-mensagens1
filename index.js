@@ -37,8 +37,6 @@ let cacheMarcasFipe = null;
 const filaFotos = {};
 const ultimaNotificacao = {};
 const conversasVisualizadas = {};
-
-// Controla clientes que pararam de responder
 const ultimaMensagemCliente = {};
 
 // ─────────────────────────────────────────────
@@ -209,7 +207,6 @@ async function detectarLeadFrio(from, text, historicoConversa) {
     let motivo = null;
     let diasAguardar = 1;
 
-    // VAI PENSAR — 1 dia
     const frasesPensar = [
       "vou pensar", "preciso pensar", "deixa eu pensar",
       "vou ver", "deixa eu ver", "vou decidir",
@@ -225,7 +222,6 @@ async function detectarLeadFrio(from, text, historicoConversa) {
       diasAguardar = 1;
     }
 
-    // ACHOU CARO — 3 dias
     const frasesCaro = [
       "tá caro", "está caro", "muito caro", "caro demais",
       "não tenho condição", "não tenho dinheiro", "sem condição",
@@ -233,14 +229,13 @@ async function detectarLeadFrio(from, text, historicoConversa) {
       "fora do meu orçamento", "acima do meu orçamento",
       "não cabe no bolso", "não tenho esse valor",
       "não consigo", "não tenho como", "excede meu orçamento",
-      "ultrapassa meu orçamento", "não tenho budget"
+      "ultrapassa meu orçamento"
     ];
     if (!motivo && frasesCaro.some(f => t.includes(f))) {
       motivo = "achou_caro";
       diasAguardar = 3;
     }
 
-    // AVALIAÇÃO BAIXA — 5 dias
     const frasesAvaliacao = [
       "avaliação baixa", "avaliacao baixa", "pouco pelo meu",
       "esperava mais", "vale mais", "não compensa",
@@ -252,7 +247,6 @@ async function detectarLeadFrio(from, text, historicoConversa) {
       diasAguardar = 5;
     }
 
-    // SEM INTERESSE — 7 dias
     const frasesSemInteresse = [
       "não tenho interesse", "nao tenho interesse",
       "desisti", "não quero mais", "nao quero mais",
@@ -275,7 +269,6 @@ async function detectarLeadFrio(from, text, historicoConversa) {
   }
 }
 
-// Verifica clientes que pararam de responder há mais de 24h
 async function verificarClientesSumidos() {
   try {
     const agora = Date.now();
@@ -283,7 +276,6 @@ async function verificarClientesSumidos() {
 
     for (const [telefone, ultimaMensagem] of Object.entries(ultimaMensagemCliente)) {
       if (agora - ultimaMensagem > vintequatroHoras) {
-        // Verifica se já tem follow-up pendente
         const { data } = await supabase
           .from("followups")
           .select("id")
@@ -298,7 +290,7 @@ async function verificarClientesSumidos() {
             .match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
 
           await agendarFollowUp(telefone, "sumiu", veiculoMatch ? veiculoMatch[0] : null, 5);
-          console.log(`[FollowUp] Cliente sumido detectado: ${telefone}`);
+          console.log(`[FollowUp] Cliente sumido: ${telefone}`);
         }
 
         delete ultimaMensagemCliente[telefone];
@@ -309,7 +301,6 @@ async function verificarClientesSumidos() {
   }
 }
 
-// Verifica clientes sumidos a cada hora
 setInterval(verificarClientesSumidos, 60 * 60 * 1000);
 
 async function gerarMensagemFollowUp(followup) {
@@ -324,7 +315,6 @@ async function gerarMensagemFollowUp(followup) {
     };
 
     const prompt = prompts[followup.motivo] || prompts.vai_pensar;
-
     const res = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
@@ -334,7 +324,6 @@ async function gerarMensagemFollowUp(followup) {
       },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-
     return res.data.content[0].text;
   } catch (e) {
     console.error("[FollowUp] Erro gerarMensagem:", e.message);
@@ -352,7 +341,6 @@ async function processarFollowUpsPendentes() {
       .lte("agendado_para", agora);
 
     if (!followups || followups.length === 0) return;
-
     console.log(`[FollowUp] ${followups.length} follow-up(s) para enviar`);
 
     for (const followup of followups) {
@@ -365,16 +353,12 @@ async function processarFollowUpsPendentes() {
           { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
         );
-
         await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
         await salvarMensagem(followup.telefone, "sara", mensagem);
-
         if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
         conversas[followup.telefone].push({ role: "assistant", content: mensagem });
-
         console.log(`[FollowUp] ✅ Enviado para ${followup.telefone}`);
         await notificarAugusto(followup.telefone, `[FollowUp automático]: ${mensagem}`, false);
-
       } catch (e) {
         console.error(`[FollowUp] Erro ao enviar para ${followup.telefone}:`, e.message);
       }
@@ -419,8 +403,29 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   }
 }
 
+// Notifica Augusto sobre interesse em carro não disponível
+async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
+  const numero = from.replace(/\D/g, "");
+  const formatado = numero.length >= 12
+    ? `+${numero.slice(0, 2)} (${numero.slice(2, 4)}) ${numero.slice(4, 9)}-${numero.slice(9)}`
+    : from;
+
+  const mensagem = `🔍 *Cliente buscando carro não disponível*\n\nCliente: ${formatado}\nCarro de interesse: *${modeloBuscado}*\n${infoCliente ? `Detalhes: ${infoCliente}` : ""}\n\nConsidere buscar esse veículo para o cliente!`;
+
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[Notificação] ✅ Carro não disponível notificado: ${modeloBuscado}`);
+  } catch (e) {
+    console.error(`[Notificação] Erro carro não disponível:`, e.message);
+  }
+}
+
 // ─────────────────────────────────────────────
-// INSTAGRAM — SINCRONIZAÇÃO DE ESTOQUE
+// INSTAGRAM — SINCRONIZAÇÃO A CADA 30 MINUTOS
 // ─────────────────────────────────────────────
 
 async function buscarEstoqueInstagram() {
@@ -481,7 +486,8 @@ async function sincronizarEstoque() {
 }
 
 sincronizarEstoque();
-setInterval(sincronizarEstoque, 6 * 60 * 60 * 1000);
+// ✅ Sincroniza a cada 30 minutos em vez de 6 horas
+setInterval(sincronizarEstoque, 30 * 60 * 1000);
 
 // ─────────────────────────────────────────────
 // FIPE
@@ -696,6 +702,44 @@ async function enviarFotosVeiculo(to, veiculo) {
 }
 
 // ─────────────────────────────────────────────
+// DETECTA MODELO BUSCADO PELO CLIENTE
+// ─────────────────────────────────────────────
+
+async function extrairModeloBuscado(textos) {
+  try {
+    const texto = textos.join(" ");
+    const res = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        messages: [{
+          role: "user",
+          content: `Analise o texto e extraia o modelo de carro que o cliente quer COMPRAR ou está procurando.
+Responda APENAS em JSON: {"modelo": "...", "ano": "..."}
+Se não encontrar, coloque null.
+
+Exemplos:
+- "quero uma renegade 2020" → {"modelo": "renegade", "ano": "2020"}
+- "procuro um corolla" → {"modelo": "corolla", "ano": null}
+- "tenho um gol pra vender" → {"modelo": null, "ano": null}
+
+Texto: "${texto}"`
+        }]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+    const resposta = res.data.content[0].text.trim();
+    const jsonMatch = resposta.match(/\{[^}]+\}/);
+    if (!jsonMatch) return null;
+    const json = JSON.parse(jsonMatch[0]);
+    return json.modelo ? json : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
 // SYSTEM PROMPT
 // ─────────────────────────────────────────────
 
@@ -709,7 +753,7 @@ function formatarEstoque() {
   }).join("\n");
 }
 
-const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "") => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
 EMPRESA:
 - Endereço: Av. Aparício Borges, 931 - Porto Alegre/RS
@@ -729,10 +773,25 @@ REGRAS DE PREÇO:
 - Use EXATAMENTE os preços do estoque acima
 - NUNCA altere, arredonde ou invente preços
 
+QUANDO CLIENTE PEDE CARRO QUE NÃO ESTÁ NO ESTOQUE:
+${carroNaoDisponivel ?
+    `⚠️ O cliente está procurando: ${carroNaoDisponivel}
+Este modelo NÃO está disponível no momento.
+NUNCA diga simplesmente "não temos". Siga este fluxo:
+1. Diga que esse modelo não está disponível no momento
+2. Pergunte mais detalhes para encontrar algo similar ou avisá-lo quando chegar:
+   - "Que ano você está procurando?"
+   - "Qual sua faixa de preço?"
+   - "Tem carro para dar na troca?"
+3. Ofereça alternativas do estoque APENAS se tiver algo similar
+4. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui!"
+O sistema já notificou o consultor sobre o interesse deste cliente.` :
+    `Se cliente pedir carro não disponível: qualifique o cliente (ano, versão, orçamento, troca) antes de oferecer alternativas. Ofereça avisar quando chegar.`
+  }
+
 FOTOS DOS VEÍCULOS:
 - Quando o sistema confirmar que fotos foram enviadas, diga: "Mandei as fotos pra você! O que achou? 😊"
-- NUNCA escreva tags XML como <request_photos> ou similares
-- NUNCA diga que vai "solicitar", "buscar" ou "pedir" as fotos
+- NUNCA escreva tags XML
 - NUNCA diga que enviou fotos se o sistema não confirmou
 - Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
 
@@ -745,12 +804,10 @@ ETAPA 1 — Conhecer o carro:
 - Quilometragem atual?
 - Estado geral (pintura, mecânica, pneus)?
 - Revisões em dia?
-- Já tem avaliação prévia?
 - Pode mandar fotos? 📸
 
-ETAPA 2 — Quando cliente mandar fotos do carro DELE:
+ETAPA 2 — Quando cliente mandar fotos:
 - Agradeça e comente positivamente
-- Continue coletando informações se necessário
 
 ETAPA 3 — Só após ter km, estado e fotos:
 ${fipeInfo ? (() => {
@@ -762,49 +819,36 @@ NÃO mencione FIPE, percentuais ou descontos.`;
   })() : `⚠️ FIPE não consultada — NUNCA invente valores.`}
 
 QUANDO CLIENTE ACHAR CARO OU FORA DO ORÇAMENTO:
-NUNCA encerre a conversa. Sempre pergunte o orçamento ideal:
-- "Entendo! Pra gente tentar te ajudar melhor, qual seria o valor de parcela que cabe no seu orçamento?"
-- Com o valor informado, tente adaptar: prazo maior, entrada maior, ou veículo similar mais acessível do estoque
-- Se tiver veículo similar mais barato no estoque, sugira
-- Só encerre se cliente insistir que não tem interesse
+NUNCA encerre. Pergunte: "Qual seria o valor de parcela que cabe no seu orçamento?"
+Com o valor informado, tente adaptar: prazo maior, entrada maior, ou veículo similar mais acessível.
 
 QUANDO CLIENTE DISSER "VOU PENSAR" OU CONSULTAR ALGUÉM:
-NUNCA encerre imediatamente. Tente entender o motivo:
-- "Entendo! Posso perguntar o que ficou na dúvida? É o valor, as condições ou algo específico do carro?"
-- Se for preço: ofereça simulação diferente
-- Se for avaliação: reforce que a avaliação presencial pode melhorar
-- Se insistir: "Sem problema! 😊 Fico à disposição. O carro pode sair rápido, então avise quando puder!"
+NUNCA encerre imediatamente. Pergunte o que ficou na dúvida.
+Se insistir: "Sem problema! 😊 Fico à disposição. O carro pode sair rápido, avise quando puder!"
 
 SIMULAÇÃO DE FINANCIAMENTO:
-Taxa 1,8%/mês. Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
+Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
 Apresente apenas o valor da parcela.
-NUNCA pergunte sobre financiamento sem o cliente mencionar interesse.
+NUNCA pergunte sobre financiamento sem o cliente mencionar.
 
 FINANCIAMENTO ACIMA DO PREÇO (TROCO):
-Carros podem estar abaixo da FIPE. Banco financia até o valor FIPE.
-Calcule: saldo troca = avaliação - dívida. Valor financiado = preço carro + troco - saldo troca.
+Banco financia até o valor FIPE. Calcule: saldo troca = avaliação - dívida.
 
 REGRAS:
 - Primeira mensagem: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
 - Demais mensagens: direto ao assunto, máximo 4 linhas
 - Emojis com moderação 🚗
 - Humano: (51) 99364-2476
-- NUNCA invente links ou URLs
-- NUNCA invente informações de estoque
-- NUNCA pergunte sobre financiamento sem o cliente mencionar
-- NUNCA use tags XML ou HTML nas respostas${aprendizadosExtra}`;
+- NUNCA invente links, URLs ou informações de estoque
+- NUNCA use tags XML${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
 // PROCESSAMENTO DE MENSAGENS
 // ─────────────────────────────────────────────
 
 async function processarMensagem(from, text) {
-  if (!text || typeof text !== "string") {
-    console.error(`[Erro] Texto inválido de ${from}:`, text);
-    return;
-  }
+  if (!text || typeof text !== "string") return;
 
-  // Atualiza timestamp da última mensagem do cliente (para detectar sumidos)
   ultimaMensagemCliente[from] = Date.now();
 
   const primeiraVez = !ultimaNotificacao[from];
@@ -816,6 +860,39 @@ async function processarMensagem(from, text) {
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
 
+  // Detecta se cliente busca carro não disponível no estoque
+  let carroNaoDisponivel = null;
+  const todosTextosCliente = conversas[from].filter(m => m.role === "user").map(m => m.content);
+  const modeloBuscado = await extrairModeloBuscado(todosTextosCliente);
+
+  if (modeloBuscado) {
+    const modeloNome = modeloBuscado.modelo.toLowerCase();
+    const anoNome = modeloBuscado.ano;
+
+    const encontrado = estoqueAtual.some(v => {
+      const modeloEstoque = limparTexto(v.modelo || "").toLowerCase();
+      const anoOk = !anoNome || String(v.ano) === String(anoNome);
+      return modeloEstoque.includes(modeloNome) && anoOk;
+    });
+
+    if (!encontrado) {
+      const descricao = `${modeloBuscado.modelo}${anoNome ? ` ${anoNome}` : ""}`;
+      carroNaoDisponivel = descricao;
+
+      // Notifica Augusto apenas uma vez por conversa
+      const jaNotificou = conversas[from].some(m => m.content?.includes("[Sistema: cliente buscou"));
+      if (!jaNotificou) {
+        const infoCliente = todosTextosCliente.slice(-3).join(" | ");
+        notificarCarroNaoDisponivel(from, descricao, infoCliente).catch(() => {});
+        conversas[from].push({
+          role: "user",
+          content: `[Sistema: cliente buscou ${descricao} que não está no estoque. Augusto foi notificado. Qualifique o cliente.]`
+        });
+      }
+    }
+  }
+
+  // Detecta pedido de fotos do estoque
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
   const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos enviadas");
@@ -827,13 +904,12 @@ async function processarMensagem(from, text) {
       await enviarFotosVeiculo(from, veiculo);
       conversas[from].push({
         role: "user",
-        content: `[Sistema: fotos enviadas automaticamente do ${limparTexto(veiculo.modelo)}. Confirme o envio de forma natural e pergunte o que o cliente achou.]`
+        content: `[Sistema: fotos enviadas automaticamente do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que o cliente achou.]`
       });
     }
   }
 
-  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
-  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextos);
+  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextosCliente);
   let fipeInfo = null;
   if (marca && modelo && ano) fipeInfo = await consultarFipe(marca, modelo, ano);
 
@@ -842,7 +918,7 @@ async function processarMensagem(from, text) {
     {
       model: "claude-sonnet-4-5",
       max_tokens: 500,
-      system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(() => "")),
+      system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(() => ""), carroNaoDisponivel),
       messages: conversas[from]
     },
     { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
@@ -874,7 +950,7 @@ async function processarFotosAgrupadas(from, analises) {
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
 app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
-app.get("/sincronizar", async (req, res) => { res.send("Iniciado!"); await sincronizarEstoque(); });
+app.get("/sincronizar", async (req, res) => { res.send("Sincronização iniciada!"); await sincronizarEstoque(); });
 
 app.get("/testar-notificacao", async (req, res) => {
   try {
