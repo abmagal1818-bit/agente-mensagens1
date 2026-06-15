@@ -36,9 +36,10 @@ const fipeCache = {};
 let cacheMarcasFipe = null;
 const filaFotos = {};
 const ultimaNotificacao = {};
-
-// Controla quando cada conversa foi visualizada no painel
 const conversasVisualizadas = {};
+
+// Controla clientes que pararam de responder
+const ultimaMensagemCliente = {};
 
 // ─────────────────────────────────────────────
 // UTILITÁRIOS
@@ -120,9 +121,6 @@ async function listarConversas() {
           naoLida: 0
         };
       }
-
-      // Conta como não lida apenas mensagens do cliente
-      // que chegaram DEPOIS da última vez que você abriu a conversa no painel
       if (m.tipo === "client") {
         const visualizadoEm = conversasVisualizadas[m.telefone] || 0;
         const chegouEm = new Date(m.criado_em).getTime();
@@ -205,29 +203,70 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar)
 
 async function detectarLeadFrio(from, text, historicoConversa) {
   try {
-    const texto = text.toLowerCase();
+    const t = text.toLowerCase();
     const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
 
     let motivo = null;
-    let diasAguardar = 3;
+    let diasAguardar = 1;
 
-    if (texto.includes("vou pensar") || texto.includes("vou ver") || texto.includes("depois vejo") || texto.includes("mais tarde")) {
+    // VAI PENSAR — 1 dia
+    const frasesPensar = [
+      "vou pensar", "preciso pensar", "deixa eu pensar",
+      "vou ver", "deixa eu ver", "vou decidir",
+      "vou falar com minha esposa", "vou falar com meu marido",
+      "vou falar com a minha esposa", "vou falar com o meu marido",
+      "vou consultar", "vou falar com a família", "vou falar com minha familia",
+      "retorno em breve", "depois te aviso", "te aviso depois",
+      "vou dar um retorno", "vou retornar", "depois eu volto",
+      "vou conversar com", "deixa eu conversar"
+    ];
+    if (frasesPensar.some(f => t.includes(f))) {
       motivo = "vai_pensar";
-      diasAguardar = 2;
-    } else if (texto.includes("caro") || texto.includes("muito valor") || texto.includes("não tenho dinheiro") || texto.includes("sem condição")) {
+      diasAguardar = 1;
+    }
+
+    // ACHOU CARO — 3 dias
+    const frasesCaro = [
+      "tá caro", "está caro", "muito caro", "caro demais",
+      "não tenho condição", "não tenho dinheiro", "sem condição",
+      "tá pesado", "está pesado", "pesado demais",
+      "fora do meu orçamento", "acima do meu orçamento",
+      "não cabe no bolso", "não tenho esse valor",
+      "não consigo", "não tenho como", "excede meu orçamento",
+      "ultrapassa meu orçamento", "não tenho budget"
+    ];
+    if (!motivo && frasesCaro.some(f => t.includes(f))) {
       motivo = "achou_caro";
-      diasAguardar = 5;
-    } else if (texto.includes("avaliação baixa") || texto.includes("pouco pelo meu") || texto.includes("não vale")) {
+      diasAguardar = 3;
+    }
+
+    // AVALIAÇÃO BAIXA — 5 dias
+    const frasesAvaliacao = [
+      "avaliação baixa", "avaliacao baixa", "pouco pelo meu",
+      "esperava mais", "vale mais", "não compensa",
+      "abaixo do esperado", "não gostei da avaliação",
+      "achei pouco", "muito pouco", "não é justo"
+    ];
+    if (!motivo && frasesAvaliacao.some(f => t.includes(f))) {
       motivo = "avaliacao_baixa";
-      diasAguardar = 7;
-    } else if (texto.includes("não tenho interesse") || texto.includes("desisti") || texto.includes("não quero mais")) {
+      diasAguardar = 5;
+    }
+
+    // SEM INTERESSE — 7 dias
+    const frasesSemInteresse = [
+      "não tenho interesse", "nao tenho interesse",
+      "desisti", "não quero mais", "nao quero mais",
+      "mudei de ideia", "não vou mais", "nao vou mais",
+      "cancelar", "esquece", "deixa pra lá", "deixa pra la"
+    ];
+    if (!motivo && frasesSemInteresse.some(f => t.includes(f))) {
       motivo = "sem_interesse";
-      diasAguardar = 10;
+      diasAguardar = 7;
     }
 
     if (!motivo) return;
 
-    const veiculoMatch = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo/i);
+    const veiculoMatch = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
     const veiculoInteresse = veiculoMatch ? veiculoMatch[0] : null;
 
     await agendarFollowUp(from, motivo, veiculoInteresse, diasAguardar);
@@ -236,14 +275,52 @@ async function detectarLeadFrio(from, text, historicoConversa) {
   }
 }
 
+// Verifica clientes que pararam de responder há mais de 24h
+async function verificarClientesSumidos() {
+  try {
+    const agora = Date.now();
+    const vintequatroHoras = 24 * 60 * 60 * 1000;
+
+    for (const [telefone, ultimaMensagem] of Object.entries(ultimaMensagemCliente)) {
+      if (agora - ultimaMensagem > vintequatroHoras) {
+        // Verifica se já tem follow-up pendente
+        const { data } = await supabase
+          .from("followups")
+          .select("id")
+          .eq("telefone", telefone)
+          .eq("enviado", false)
+          .limit(1);
+
+        if (!data || data.length === 0) {
+          const historico = conversas[telefone] || [];
+          const veiculoMatch = historico
+            .map(m => m.content || "").join(" ").toLowerCase()
+            .match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
+
+          await agendarFollowUp(telefone, "sumiu", veiculoMatch ? veiculoMatch[0] : null, 5);
+          console.log(`[FollowUp] Cliente sumido detectado: ${telefone}`);
+        }
+
+        delete ultimaMensagemCliente[telefone];
+      }
+    }
+  } catch (e) {
+    console.error("[FollowUp] Erro verificarClientesSumidos:", e.message);
+  }
+}
+
+// Verifica clientes sumidos a cada hora
+setInterval(verificarClientesSumidos, 60 * 60 * 1000);
+
 async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
     const prompts = {
-      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas em Porto Alegre. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta, natural e calorosa de follow-up para reativar o interesse, sem pressionar. Máximo 3 linhas.`,
-      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Crie uma mensagem curta oferecendo ajuda para encontrar uma solução de financiamento ou veículo similar mais acessível. Máximo 3 linhas.`,
-      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação do carro na troca. Crie uma mensagem curta e empática reforçando que a avaliação final é presencial e pode surpreender. Máximo 3 linhas.`,
-      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha interesse. Crie uma mensagem muito leve perguntando se posso ajudar de outra forma ou se surgiu alguma novidade. Máximo 2 linhas.`
+      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas em Porto Alegre. Um cliente estava interessado em ${veiculo} mas disse que ia pensar ou consultar alguém. Crie uma mensagem curta, natural e calorosa de follow-up para reativar o interesse, sem pressionar. Máximo 3 linhas.`,
+      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro ou fora do orçamento. Crie uma mensagem curta e empática perguntando qual seria o valor de parcela ideal pra ele, para tentar adaptar a proposta. Máximo 3 linhas.`,
+      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação do carro na troca. Crie uma mensagem curta e empática reforçando que a avaliação presencial pode surpreender positivamente. Máximo 3 linhas.`,
+      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha mais interesse. Crie uma mensagem muito leve e não invasiva perguntando se surgiu alguma novidade ou se posso ajudar de outra forma. Máximo 2 linhas.`,
+      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Um cliente que estava interessado em ${veiculo} parou de responder. Crie uma mensagem curta e natural para retomar o contato, sem pressionar. Máximo 2 linhas.`
     };
 
     const prompt = prompts[followup.motivo] || prompts.vai_pensar;
@@ -674,7 +751,6 @@ ETAPA 1 — Conhecer o carro:
 ETAPA 2 — Quando cliente mandar fotos do carro DELE:
 - Agradeça e comente positivamente
 - Continue coletando informações se necessário
-- NUNCA ignore fotos recebidas do cliente
 
 ETAPA 3 — Só após ter km, estado e fotos:
 ${fipeInfo ? (() => {
@@ -685,12 +761,19 @@ Diga: "Com base no que você me passou, conseguimos trabalhar entre R$ ${v.minim
 NÃO mencione FIPE, percentuais ou descontos.`;
   })() : `⚠️ FIPE não consultada — NUNCA invente valores.`}
 
-QUANDO CLIENTE DISSER "VOU PENSAR" OU DEMONSTRAR HESITAÇÃO:
-NUNCA encerre a conversa imediatamente. Sempre tente entender o motivo:
-- "Entendo! Posso perguntar o que ficou na dúvida? É o valor, as condições de financiamento ou algo específico do carro?"
-- Se for preço: ofereça simulação diferente ou outro veículo similar
-- Se for avaliação de troca: reforce que a avaliação presencial pode ser melhor
-- Se insistir em pensar: "Sem problema! Fico à disposição. 😊 O carro pode ser vendido rapidinho, então avise quando puder!"
+QUANDO CLIENTE ACHAR CARO OU FORA DO ORÇAMENTO:
+NUNCA encerre a conversa. Sempre pergunte o orçamento ideal:
+- "Entendo! Pra gente tentar te ajudar melhor, qual seria o valor de parcela que cabe no seu orçamento?"
+- Com o valor informado, tente adaptar: prazo maior, entrada maior, ou veículo similar mais acessível do estoque
+- Se tiver veículo similar mais barato no estoque, sugira
+- Só encerre se cliente insistir que não tem interesse
+
+QUANDO CLIENTE DISSER "VOU PENSAR" OU CONSULTAR ALGUÉM:
+NUNCA encerre imediatamente. Tente entender o motivo:
+- "Entendo! Posso perguntar o que ficou na dúvida? É o valor, as condições ou algo específico do carro?"
+- Se for preço: ofereça simulação diferente
+- Se for avaliação: reforce que a avaliação presencial pode melhorar
+- Se insistir: "Sem problema! 😊 Fico à disposição. O carro pode sair rápido, então avise quando puder!"
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Taxa 1,8%/mês. Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
@@ -720,6 +803,9 @@ async function processarMensagem(from, text) {
     console.error(`[Erro] Texto inválido de ${from}:`, text);
     return;
   }
+
+  // Atualiza timestamp da última mensagem do cliente (para detectar sumidos)
+  ultimaMensagemCliente[from] = Date.now();
 
   const primeiraVez = !ultimaNotificacao[from];
   if (!conversas[from]) conversas[from] = [];
@@ -1087,14 +1173,11 @@ async function abrirConversa(from) {
   document.getElementById('chatPhone').textContent = formatarTelefone(from);
   document.getElementById('chatActions').style.display = 'flex';
   document.getElementById('interventionArea').style.display = 'block';
-
-  // Marca conversa como visualizada agora
   await fetch(API + '/painel/visualizar', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ from })
   });
-
   await carregarMensagens(from);
   await carregarConversas();
 }
@@ -1135,9 +1218,9 @@ async function enviarIntervencao() {
 
 async function agendarFollowUpManual() {
   if (!conversaAtiva) return;
-  const motivo = prompt('Motivo:\\n- vai_pensar\\n- achou_caro\\n- avaliacao_baixa\\n- sem_interesse');
+  const motivo = prompt('Motivo:\\n- vai_pensar (1 dia)\\n- achou_caro (3 dias)\\n- avaliacao_baixa (5 dias)\\n- sem_interesse (7 dias)\\n- sumiu (5 dias)');
   if (!motivo) return;
-  const dias = prompt('Em quantos dias enviar? (ex: 2, 3, 7)');
+  const dias = prompt('Em quantos dias enviar?');
   if (!dias) return;
   const res = await fetch(API + '/painel/followup', {
     method: 'POST',
@@ -1251,7 +1334,6 @@ app.get("/painel/mensagens/:from", async (req, res) => {
   catch (e) { res.json({ mensagens: [] }); }
 });
 
-// Marca conversa como visualizada — zera contador de não lidas
 app.post("/painel/visualizar", (req, res) => {
   const { from } = req.body;
   if (from) conversasVisualizadas[from] = Date.now();
