@@ -197,8 +197,6 @@ async function notificarAugusto(from, texto) {
   const agora = Date.now();
   const ultima = ultimaNotificacao[from] || 0;
   const trintaMinutos = 30 * 60 * 1000;
-
-  // Notifica se for primeira vez ou se passaram 30 minutos
   if (agora - ultima < trintaMinutos) return;
   ultimaNotificacao[from] = agora;
 
@@ -210,14 +208,15 @@ async function notificarAugusto(from, texto) {
   const mensagem = `📩 *Mensagem na Sarah*\nNúmero: ${formatado}\nMensagem: "${texto.substring(0, 100)}"\n\nAcesse o painel: https://agente-mensagens1.onrender.com/painel`;
 
   try {
-    await axios.post(
+    const resultado = await axios.post(
       `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
-    console.log(`[Notificação] Augusto notificado — ${formatado}`);
+    console.log(`[Notificação] ✅ Enviada para ${NUMERO_AUGUSTO} | ID: ${resultado.data?.messages?.[0]?.id}`);
   } catch (e) {
-    console.error("[Notificação] Erro:", e.message);
+    console.error(`[Notificação] ❌ Erro ao notificar ${NUMERO_AUGUSTO}:`, e.message);
+    if (e.response) console.error("[Notificação] Detalhe:", JSON.stringify(e.response.data));
   }
 }
 
@@ -447,9 +446,9 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
 
   if (t.includes("foto")) {
     const historico = (historicoConversa || []).slice(-6).map(m => m.content || "").join(" ").toLowerCase();
-    const clienteAvaliadoCarroDele = historico.includes("meu carro") || historico.includes("tenho um") ||
+    const clienteAvaliandoCarroDele = historico.includes("meu carro") || historico.includes("tenho um") ||
       historico.includes("quero vender") || historico.includes("na troca");
-    if (clienteAvaliadoCarroDele && (t.includes("vou") || t.includes("ja") || t.includes("já") || t.includes("mando"))) return false;
+    if (clienteAvaliandoCarroDele && (t.includes("vou") || t.includes("ja") || t.includes("já") || t.includes("mando"))) return false;
     return true;
   }
 
@@ -536,7 +535,7 @@ REGRAS DE PREÇO:
 - NUNCA altere, arredonde ou invente preços
 
 FOTOS DOS VEÍCULOS:
-- Quando o sistema confirmar que fotos foram enviadas, diga naturalmente: "Mandei as fotos pra você! O que achou?" 
+- Quando o sistema confirmar que fotos foram enviadas, diga naturalmente: "Mandei as fotos pra você! O que achou?"
 - NUNCA diga que enviou fotos se o sistema não confirmou
 - Se não tiver fotos disponíveis: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
 
@@ -591,13 +590,9 @@ async function processarMensagem(from, text) {
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
   salvarMensagemSheets(from, "client", text).catch(() => {});
-
-  // Notifica Augusto a cada 30 minutos por cliente
   notificarAugusto(from, text).catch(() => {});
-
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
-  // Detecta pedido de fotos DO ESTOQUE (não foto do carro do cliente)
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
   const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos enviadas");
@@ -658,6 +653,24 @@ app.get("/", (req, res) => res.send("Agente funcionando!"));
 app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
 app.get("/sincronizar", async (req, res) => { res.send("Iniciado!"); await sincronizarEstoque(); });
 
+// Rota de teste de notificação
+app.get("/testar-notificacao", async (req, res) => {
+  try {
+    const resultado = await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: NUMERO_AUGUSTO,
+        text: { body: "✅ Teste de notificação da Sarah funcionando!" }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    res.json({ ok: true, numero: NUMERO_AUGUSTO, resultado: resultado.data });
+  } catch (e) {
+    res.json({ ok: false, numero: NUMERO_AUGUSTO, erro: e.message, detalhe: e.response?.data });
+  }
+});
+
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
     res.send(req.query["hub.challenge"]);
@@ -712,10 +725,17 @@ app.post("/webhook", async (req, res) => {
         }
 
         const analise = await analisarImagem(msg.image.id, caption);
+
+        // Verifica novamente se a fila ainda existe após análise
+        if (!filaFotos[from]) {
+          filaFotos[from] = { analises: [], timer: null };
+        }
+
         if (analise) filaFotos[from].analises.push(analise);
 
-        // Aguarda 3 segundos para agrupar múltiplas fotos
         filaFotos[from].timer = setTimeout(async () => {
+          // PROTEÇÃO contra fila deletada durante análise
+          if (!filaFotos[from]) return;
           const analises = [...filaFotos[from].analises];
           delete filaFotos[from];
           if (analises.length > 0) {
@@ -1055,21 +1075,6 @@ app.post("/painel/resolver", async (req, res) => {
   if (conversas[from]) delete conversas[from];
   res.json({ ok: true });
 });
-app.get("/testar-notificacao", async (req, res) => {
-  try {
-    const resultado = await axios.post(
-      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: NUMERO_AUGUSTO,
-        text: { body: "✅ Teste de notificação da Sarah funcionando!" }
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
-    res.json({ ok: true, resultado: resultado.data, numero: NUMERO_AUGUSTO });
-  } catch (e) {
-    res.json({ ok: false, erro: e.message, detalhe: e.response?.data, numero: NUMERO_AUGUSTO });
-  }
-});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
