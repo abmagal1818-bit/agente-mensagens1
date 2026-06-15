@@ -1055,6 +1055,21 @@ app.post("/painel/resolver", async (req, res) => {
   if (conversas[from]) delete conversas[from];
   res.json({ ok: true });
 });
-
+app.get("/testar-notificacao", async (req, res) => {
+  try {
+    const resultado = await axios.post(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: NUMERO_AUGUSTO,
+        text: { body: "✅ Teste de notificação da Sarah funcionando!" }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    res.json({ ok: true, resultado: resultado.data, numero: NUMERO_AUGUSTO });
+  } catch (e) {
+    res.json({ ok: false, erro: e.message, detalhe: e.response?.data, numero: NUMERO_AUGUSTO });
+  }
+});
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
