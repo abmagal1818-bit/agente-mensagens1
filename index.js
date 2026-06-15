@@ -1,7 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
-const https = require("https");
+const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json());
 app.use((req, res, next) => {
@@ -19,9 +19,11 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const INSTAGRAM_TOKEN = process.env.INSTAGRAM_TOKEN;
 const INSTAGRAM_ACCOUNT_ID = "17841407009898490";
-const SHEETS_ID = process.env.SHEETS_ID || "1zhOUFmzlwHsyCh3OuYAdZzMYN3EfKLxkVgODJxgxdYo";
-const SHEETS_CREDENTIALS = process.env.GOOGLE_CREDENTIALS ? JSON.parse(process.env.GOOGLE_CREDENTIALS) : null;
 const NUMERO_AUGUSTO = process.env.NUMERO_AUGUSTO || "5551993716729";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 let estoqueAtual = [];
 let ultimaAtualizacao = null;
@@ -47,147 +49,248 @@ function limparTexto(str) {
 }
 
 // ─────────────────────────────────────────────
-// GOOGLE SHEETS
+// SUPABASE — MENSAGENS
 // ─────────────────────────────────────────────
 
-async function obterTokenSheets() {
-  if (!SHEETS_CREDENTIALS) return null;
+async function salvarMensagem(telefone, tipo, texto) {
   try {
-    const now = Math.floor(Date.now() / 1000);
-    const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-    const payload = Buffer.from(JSON.stringify({
-      iss: SHEETS_CREDENTIALS.client_email,
-      scope: "https://www.googleapis.com/auth/spreadsheets",
-      aud: "https://oauth2.googleapis.com/token",
-      exp: now + 3600,
-      iat: now
-    })).toString("base64url");
-    const sign = require("crypto").createSign("RSA-SHA256");
-    sign.update(`${header}.${payload}`);
-    const signature = sign.sign(SHEETS_CREDENTIALS.private_key, "base64url");
-    const jwtToken = `${header}.${payload}.${signature}`;
-    const res = await axios.post("https://oauth2.googleapis.com/token",
-      `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwtToken}`,
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-    return res.data.access_token;
+    await supabase.from("mensagens").insert({
+      telefone, tipo,
+      texto: String(texto).substring(0, 500)
+    });
+    // Atualiza última interação do cliente
+    await supabase.from("clientes").upsert({
+      telefone,
+      ultima_interacao: new Date().toISOString()
+    }, { onConflict: "telefone" });
   } catch (e) {
-    console.error("[Sheets] Erro token:", e.message);
-    return null;
+    console.error("[Supabase] Erro salvarMensagem:", e.message);
   }
 }
 
-async function sheetsGet(range) {
-  const token = await obterTokenSheets();
-  if (!token) return null;
+async function buscarMensagens(telefone) {
   try {
-    const res = await axios.get(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    return res.data.values || [];
+    const { data } = await supabase
+      .from("mensagens")
+      .select("*")
+      .eq("telefone", telefone)
+      .order("criado_em", { ascending: true })
+      .limit(100);
+    return data || [];
   } catch (e) {
-    console.error("[Sheets] Erro get:", e.message);
-    return null;
+    console.error("[Supabase] Erro buscarMensagens:", e.message);
+    return [];
   }
 }
 
-async function sheetsAppend(range, values) {
-  const token = await obterTokenSheets();
-  if (!token) return;
+async function listarConversas() {
   try {
-    await axios.post(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-      { values },
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
-    );
-  } catch (e) {
-    console.error("[Sheets] Erro append:", e.message);
-  }
-}
+    const { data } = await supabase
+      .from("mensagens")
+      .select("telefone, texto, tipo, criado_em")
+      .order("criado_em", { ascending: false });
 
-async function sheetsUpdate(range, values) {
-  const token = await obterTokenSheets();
-  if (!token) return;
-  try {
-    await axios.put(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
-      { values },
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+    if (!data) return [];
+
+    const mapa = {};
+    data.forEach(m => {
+      if (!mapa[m.telefone]) {
+        mapa[m.telefone] = {
+          from: m.telefone,
+          ultimaMensagem: m.texto?.substring(0, 50) || "",
+          ultimaAtividade: m.criado_em,
+          naoLida: m.tipo === "client" ? 1 : 0
+        };
+      } else if (m.tipo === "client") {
+        mapa[m.telefone].naoLida++;
+      }
+    });
+
+    return Object.values(mapa).sort((a, b) =>
+      new Date(b.ultimaAtividade) - new Date(a.ultimaAtividade)
     );
   } catch (e) {
-    console.error("[Sheets] Erro update:", e.message);
+    console.error("[Supabase] Erro listarConversas:", e.message);
+    return [];
   }
 }
 
-async function inicializarSheets() {
-  if (!SHEETS_CREDENTIALS) { console.log("[Sheets] Sem credenciais"); return; }
+// ─────────────────────────────────────────────
+// SUPABASE — APRENDIZADOS
+// ─────────────────────────────────────────────
+
+async function salvarAprendizado(situacao, correcao) {
   try {
-    const token = await obterTokenSheets();
-    if (!token) return;
-    await axios.post(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SHEETS_ID}:batchUpdate`,
-      { requests: [
-        { addSheet: { properties: { title: "Mensagens" } } },
-        { addSheet: { properties: { title: "Aprendizados" } } }
-      ]},
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
-    ).catch(() => {});
-    await sheetsUpdate("Mensagens!A1:F1", [["Timestamp", "De", "Tipo", "Texto", "Resolvido", "Intervencao"]]);
-    await sheetsUpdate("Aprendizados!A1:C1", [["Timestamp", "Situacao", "Correcao"]]);
-    console.log("[Sheets] ✅ Inicializada");
+    await supabase.from("aprendizados").insert({ situacao, correcao });
   } catch (e) {
-    console.error("[Sheets] Erro init:", e.message);
+    console.error("[Supabase] Erro salvarAprendizado:", e.message);
   }
 }
 
-async function salvarMensagemSheets(from, tipo, texto) {
-  await sheetsAppend("Mensagens!A:F", [[
-    new Date().toISOString(), from, tipo,
-    String(texto).substring(0, 500), "nao", ""
-  ]]);
-}
-
-async function buscarMensagensSheets(from) {
-  const rows = await sheetsGet("Mensagens!A:F");
-  if (!rows) return [];
-  return rows.slice(1)
-    .filter(r => r[1] === from)
-    .map(r => ({ timestamp: r[0], from: r[1], tipo: r[2], texto: r[3] || "" }));
-}
-
-async function listarConversasSheets() {
-  const rows = await sheetsGet("Mensagens!A:F");
-  if (!rows) return [];
-  const mapa = {};
-  rows.slice(1).forEach(r => {
-    const from = r[1];
-    const resolvido = r[4] === "sim";
-    if (!from || resolvido) return;
-    if (!mapa[from] || r[0] > mapa[from].ultimaAtividade) {
-      mapa[from] = {
-        from,
-        ultimaMensagem: (r[3] || "").substring(0, 50),
-        ultimaAtividade: r[0],
-        naoLida: (mapa[from]?.naoLida || 0) + (r[2] === "client" ? 1 : 0)
-      };
-    }
-  });
-  return Object.values(mapa).sort((a, b) => b.ultimaAtividade.localeCompare(a.ultimaAtividade));
-}
-
-async function buscarAprendizadosSheets() {
-  const rows = await sheetsGet("Aprendizados!A:C");
-  if (!rows) return [];
-  return rows.slice(1).map(r => ({ timestamp: r[0], situacao: r[1] || "", correcao: r[2] || "" }));
+async function buscarAprendizados() {
+  try {
+    const { data } = await supabase
+      .from("aprendizados")
+      .select("*")
+      .order("criado_em", { ascending: false })
+      .limit(20);
+    return data || [];
+  } catch (e) {
+    console.error("[Supabase] Erro buscarAprendizados:", e.message);
+    return [];
+  }
 }
 
 async function formatarAprendizados() {
-  const aprendizados = await buscarAprendizadosSheets();
+  const aprendizados = await buscarAprendizados();
   if (aprendizados.length === 0) return "";
   return "\n\nEXEMPLOS DE COMO RESPONDER (aprenda com esses casos):\n" +
-    aprendizados.slice(-10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
+    aprendizados.slice(0, 10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
 }
+
+// ─────────────────────────────────────────────
+// SUPABASE — FOLLOW-UPS
+// ─────────────────────────────────────────────
+
+async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar) {
+  try {
+    const agendadoPara = new Date();
+    agendadoPara.setDate(agendadoPara.getDate() + diasAguardar);
+
+    // Cancela follow-ups anteriores pendentes do mesmo cliente
+    await supabase
+      .from("followups")
+      .update({ enviado: true })
+      .eq("telefone", telefone)
+      .eq("enviado", false);
+
+    await supabase.from("followups").insert({
+      telefone,
+      motivo,
+      veiculo_interesse: veiculoInteresse,
+      agendado_para: agendadoPara.toISOString(),
+      enviado: false
+    });
+
+    console.log(`[FollowUp] Agendado para ${telefone} em ${diasAguardar} dias — motivo: ${motivo}`);
+  } catch (e) {
+    console.error("[Supabase] Erro agendarFollowUp:", e.message);
+  }
+}
+
+async function detectarLeadFrio(from, text, historicoConversa) {
+  try {
+    const texto = text.toLowerCase();
+    const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
+
+    // Detecta motivo do resfriamento
+    let motivo = null;
+    let diasAguardar = 3;
+
+    if (texto.includes("vou pensar") || texto.includes("vou ver") || texto.includes("depois") || texto.includes("mais tarde")) {
+      motivo = "vai_pensar";
+      diasAguardar = 2;
+    } else if (texto.includes("caro") || texto.includes("muito valor") || texto.includes("não tenho") || texto.includes("sem condição")) {
+      motivo = "achou_caro";
+      diasAguardar = 5;
+    } else if (texto.includes("avaliação baixa") || texto.includes("pouco pelo meu") || texto.includes("não vale")) {
+      motivo = "avaliacao_baixa";
+      diasAguardar = 7;
+    } else if (texto.includes("não tenho interesse") || texto.includes("desisti") || texto.includes("não quero mais")) {
+      motivo = "sem_interesse";
+      diasAguardar = 10;
+    }
+
+    if (!motivo) return;
+
+    // Detecta veículo de interesse no histórico
+    const veiculoMatch = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger/i);
+    const veiculoInteresse = veiculoMatch ? veiculoMatch[0] : null;
+
+    await agendarFollowUp(from, motivo, veiculoInteresse, diasAguardar);
+  } catch (e) {
+    console.error("[FollowUp] Erro detectarLeadFrio:", e.message);
+  }
+}
+
+async function gerarMensagemFollowUp(followup) {
+  try {
+    const veiculo = followup.veiculo_interesse || "nossos veículos";
+    const prompts = {
+      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta e natural de follow-up para reativar o interesse, sem pressionar. Máximo 3 linhas.`,
+      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Crie uma mensagem curta oferecendo ajuda para encontrar uma solução de financiamento ou um veículo similar mais acessível. Máximo 3 linhas.`,
+      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação do carro dele na troca. Crie uma mensagem curta e empática reforçando que a avaliação final é presencial e pode ser melhor. Máximo 3 linhas.`,
+      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha interesse. Crie uma mensagem muito leve e não invasiva perguntando se surgiu alguma novidade ou se posso ajudar de outra forma. Máximo 2 linhas.`
+    };
+
+    const prompt = prompts[followup.motivo] || prompts.vai_pensar;
+
+    const res = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 200,
+        messages: [{ role: "user", content: prompt }]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+
+    return res.data.content[0].text;
+  } catch (e) {
+    console.error("[FollowUp] Erro gerarMensagem:", e.message);
+    return null;
+  }
+}
+
+async function processarFollowUpsPendentes() {
+  try {
+    const agora = new Date().toISOString();
+    const { data: followups } = await supabase
+      .from("followups")
+      .select("*")
+      .eq("enviado", false)
+      .lte("agendado_para", agora);
+
+    if (!followups || followups.length === 0) return;
+
+    console.log(`[FollowUp] ${followups.length} follow-up(s) para enviar`);
+
+    for (const followup of followups) {
+      const mensagem = await gerarMensagemFollowUp(followup);
+      if (!mensagem) continue;
+
+      try {
+        await axios.post(
+          `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+
+        // Marca como enviado
+        await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
+
+        // Salva no histórico
+        await salvarMensagem(followup.telefone, "sara", mensagem);
+        if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
+        conversas[followup.telefone].push({ role: "assistant", content: mensagem });
+
+        console.log(`[FollowUp] ✅ Enviado para ${followup.telefone}: ${mensagem.substring(0, 50)}...`);
+
+        // Notifica Augusto
+        await notificarAugusto(followup.telefone, `[FollowUp automático enviado]: ${mensagem}`, false);
+
+      } catch (e) {
+        console.error(`[FollowUp] Erro ao enviar para ${followup.telefone}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error("[FollowUp] Erro processarFollowUpsPendentes:", e.message);
+  }
+}
+
+// Verifica follow-ups a cada 30 minutos
+setInterval(processarFollowUpsPendentes, 30 * 60 * 1000);
+processarFollowUpsPendentes(); // Roda na inicialização também
 
 // ─────────────────────────────────────────────
 // NOTIFICAÇÃO PARA AUGUSTO
@@ -197,9 +300,6 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   const agora = Date.now();
   const ultima = ultimaNotificacao[from] || 0;
   const trintaMinutos = 30 * 60 * 1000;
-
-  // Primeira mensagem → notifica imediatamente
-  // Mensagens seguintes → notifica a cada 30 minutos
   if (!primeiraVez && agora - ultima < trintaMinutos) return;
   ultimaNotificacao[from] = agora;
 
@@ -221,7 +321,6 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
     console.log(`[Notificação] ✅ ${primeiraVez ? "Novo cliente" : "Atualização"} — ${formatado}`);
   } catch (e) {
     console.error(`[Notificação] ❌ Erro:`, e.message);
-    if (e.response) console.error("[Notificação] Detalhe:", JSON.stringify(e.response.data));
   }
 }
 
@@ -235,7 +334,6 @@ async function buscarEstoqueInstagram() {
     const url = `https://graph.facebook.com/v25.0/${INSTAGRAM_ACCOUNT_ID}/media?fields=id,caption,media_type,media_url,children{media_url}&limit=50&access_token=${INSTAGRAM_TOKEN}`;
     const res = await axios.get(url);
     const posts = res.data.data || [];
-    console.log(`[Instagram] ${posts.length} posts encontrados`);
 
     const veiculos = [];
     for (const post of posts) {
@@ -254,15 +352,13 @@ async function buscarEstoqueInstagram() {
       const anoMatch = caption.match(/(\d{4})\/\d{4}|(\d{4})/);
       const linhas = caption.split("\n").filter(l => l.trim());
       const primeiraLinha = linhas[0] || "";
-      const preco = precoMatch ? parseFloat(precoMatch[1].replace(/\./g, "").replace(",", ".")) : 0;
-      const km = kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0;
-      const ano = anoMatch ? (anoMatch[1] || anoMatch[2]) : "";
 
       veiculos.push({
         id: post.id,
         modelo: limparTexto(primeiraLinha).replace(/[🚗🚙🏎️]/g, "").trim(),
-        marca: "", versao: "", ano, km, preco,
-        cambio: "", combustivel: "", cor: "",
+        ano: anoMatch ? (anoMatch[1] || anoMatch[2]) : "",
+        km: kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
+        preco: precoMatch ? parseFloat(precoMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
         descricao: caption, fotos,
         atualizadoEm: new Date().toISOString(),
       });
@@ -277,7 +373,6 @@ async function buscarEstoqueInstagram() {
 }
 
 async function sincronizarEstoque() {
-  console.log("[Estoque] Sincronizando via Instagram...");
   try {
     const veiculos = await buscarEstoqueInstagram();
     if (veiculos.length > 0) {
@@ -292,7 +387,6 @@ async function sincronizarEstoque() {
 
 sincronizarEstoque();
 setInterval(sincronizarEstoque, 6 * 60 * 60 * 1000);
-inicializarSheets();
 
 // ─────────────────────────────────────────────
 // FIPE
@@ -431,7 +525,6 @@ async function analisarImagem(mediaId, caption) {
 
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase();
-
   const naoEPedido = [
     "te mando", "vou mandar", "vou te mandar", "ja mando", "já mando",
     "mando agora", "mando foto", "mandando foto", "vou enviar",
@@ -443,8 +536,7 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
     "tem foto", "tem fotos", "manda foto", "manda as foto",
     "pode mandar foto", "me manda foto", "me passa foto",
     "quero ver foto", "quero ver as foto", "tem imagem",
-    "me mostra", "como tá o carro", "como está o carro",
-    "posso ver", "ver o interior", "ver o exterior",
+    "me mostra", "posso ver", "ver o interior", "ver o exterior",
     "ver por dentro", "ver por fora", "foto dele", "fotos dele"
   ];
   if (ePedido.some(p => t.includes(p))) return true;
@@ -456,15 +548,12 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
     if (clienteAvaliandoCarroDele && (t.includes("vou") || t.includes("ja") || t.includes("já") || t.includes("mando"))) return false;
     return true;
   }
-
   return false;
 }
 
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   const contexto = [texto, ...(historicoConversa || [])
-    .filter(m => m.role === "user")
-    .slice(-8)
-    .map(m => m.content)
+    .filter(m => m.role === "user").slice(-8).map(m => m.content)
   ].join(" ").toLowerCase();
 
   let melhorMatch = null;
@@ -474,16 +563,10 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     const modelo = limparTexto(v.modelo || "").toLowerCase();
     const palavras = modelo.split(/\s+/).filter(p => p.length > 2);
     let score = 0;
-    for (const p of palavras) {
-      if (contexto.includes(p)) score++;
-    }
+    for (const p of palavras) { if (contexto.includes(p)) score++; }
     if (v.ano && contexto.includes(String(v.ano))) score += 2;
-    if (score > melhorScore) {
-      melhorScore = score;
-      melhorMatch = v;
-    }
+    if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
   }
-
   return melhorScore >= 1 ? melhorMatch : null;
 }
 
@@ -542,14 +625,14 @@ REGRAS DE PREÇO:
 FOTOS DOS VEÍCULOS:
 - Quando o sistema confirmar que fotos foram enviadas, diga naturalmente: "Mandei as fotos pra você! O que achou?"
 - NUNCA diga que enviou fotos se o sistema não confirmou
-- Se não tiver fotos disponíveis: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
+- Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
 
 PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
 
 FLUXO DE AVALIAÇÃO DE TROCA:
 Quando cliente mencionar veículo para troca, NUNCA passe valor imediatamente.
 
-ETAPA 1 — Conhecer o carro (pergunte de forma natural):
+ETAPA 1 — Conhecer o carro:
 - Quilometragem atual?
 - Estado geral (pintura, mecânica, pneus)?
 - Revisões em dia?
@@ -557,9 +640,8 @@ ETAPA 1 — Conhecer o carro (pergunte de forma natural):
 - Pode mandar fotos? 📸
 
 ETAPA 2 — Quando cliente mandar fotos do carro DELE:
-- Agradeça e comente positivamente sobre o estado
+- Agradeça e comente positivamente
 - Continue coletando informações se necessário
-- NUNCA ignore fotos recebidas do cliente
 
 ETAPA 3 — Só após ter km, estado e fotos:
 ${fipeInfo ? (() => {
@@ -568,16 +650,22 @@ ${fipeInfo ? (() => {
 Faixa de avaliação: R$ ${v.minimoFormatado} a R$ ${v.maximoFormatado}
 Diga: "Com base no que você me passou, conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!"
 NÃO mencione FIPE, percentuais ou descontos.`;
-  })() : `⚠️ FIPE não consultada — NUNCA invente valores. Colete informações primeiro.`}
+  })() : `⚠️ FIPE não consultada — NUNCA invente valores.`}
+
+REATIVAÇÃO DE LEADS:
+Se o cliente demonstrar desinteresse, hesitação ou disser que vai pensar:
+- Não force a venda
+- Seja empática e deixe a porta aberta
+- Diga algo como: "Sem problema! Fico à disposição quando quiser. 😊"
+- O sistema vai fazer o follow-up automático depois
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Taxa 1,8%/mês. Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
-Apresente apenas o valor da parcela, sem mencionar a fórmula.
+Apresente apenas o valor da parcela.
 
 FINANCIAMENTO ACIMA DO PREÇO (TROCO):
-Carros do estoque podem estar abaixo da FIPE. Banco financia até o valor FIPE.
-É possível financiar valor maior que o preço para devolver dinheiro ao cliente.
-Calcule: saldo troca = avaliação - dívida. Valor financiado = preço carro + troco desejado - saldo troca.
+Carros podem estar abaixo da FIPE. Banco financia até o valor FIPE.
+Calcule: saldo troca = avaliação - dívida. Valor financiado = preço carro + troco - saldo troca.
 
 REGRAS:
 - Primeira mensagem: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
@@ -593,12 +681,14 @@ REGRAS:
 
 async function processarMensagem(from, text) {
   const primeiraVez = !ultimaNotificacao[from];
-
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
-  salvarMensagemSheets(from, "client", text).catch(() => {});
+  salvarMensagem(from, "client", text).catch(() => {});
   notificarAugusto(from, text, primeiraVez).catch(() => {});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
+
+  // Detecta lead frio e agenda follow-up
+  detectarLeadFrio(from, text, conversas[from]).catch(() => {});
 
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
@@ -642,7 +732,7 @@ async function processarMensagem(from, text) {
   );
 
   console.log(`Resposta para ${from}: ${reply}`);
-  salvarMensagemSheets(from, "sara", reply).catch(() => {});
+  salvarMensagem(from, "sara", reply).catch(() => {});
 }
 
 async function processarFotosAgrupadas(from, analises) {
@@ -653,7 +743,7 @@ async function processarFotosAgrupadas(from, analises) {
 }
 
 // ─────────────────────────────────────────────
-// ROTAS PRINCIPAIS
+// ROTAS
 // ─────────────────────────────────────────────
 
 app.get("/", (req, res) => res.send("Agente funcionando!"));
@@ -664,16 +754,21 @@ app.get("/testar-notificacao", async (req, res) => {
   try {
     const resultado = await axios.post(
       `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: NUMERO_AUGUSTO,
-        text: { body: "✅ Teste de notificação da Sarah funcionando!" }
-      },
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: "✅ Teste de notificação da Sarah funcionando!" } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
     res.json({ ok: true, numero: NUMERO_AUGUSTO, resultado: resultado.data });
   } catch (e) {
-    res.json({ ok: false, numero: NUMERO_AUGUSTO, erro: e.message, detalhe: e.response?.data });
+    res.json({ ok: false, erro: e.message, detalhe: e.response?.data });
+  }
+});
+
+app.get("/followups", async (req, res) => {
+  try {
+    const { data } = await supabase.from("followups").select("*").order("criado_em", { ascending: false }).limit(50);
+    res.json({ followups: data || [] });
+  } catch (e) {
+    res.json({ followups: [] });
   }
 });
 
@@ -722,20 +817,11 @@ app.post("/webhook", async (req, res) => {
         console.log(`Imagem recebida de ${from}`);
         const caption = msg.image.caption || "";
 
-        if (!filaFotos[from]) {
-          filaFotos[from] = { analises: [], timer: null };
-        }
-
-        if (filaFotos[from].timer) {
-          clearTimeout(filaFotos[from].timer);
-        }
+        if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
+        if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
 
         const analise = await analisarImagem(msg.image.id, caption);
-
-        if (!filaFotos[from]) {
-          filaFotos[from] = { analises: [], timer: null };
-        }
-
+        if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (analise) filaFotos[from].analises.push(analise);
 
         filaFotos[from].timer = setTimeout(async () => {
@@ -820,6 +906,7 @@ app.get("/painel", (req, res) => {
   .btn-primary { background: #f0a500; color: #000; }
   .btn-danger { background: #f44336; color: #fff; }
   .btn-secondary { background: #333; color: #fff; }
+  .btn-followup { background: #1565c0; color: #fff; }
   .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 75%; }
   .msg.client { align-self: flex-start; }
@@ -845,7 +932,14 @@ app.get("/painel", (req, res) => {
   .learning-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #f0a500; }
   .learning-item .situation { color: #888; margin-bottom: 4px; }
   .learning-item .correction { color: #b8e6b8; }
+  .followup-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #1565c0; }
+  .followup-item .fu-phone { color: #64b5f6; font-weight: 600; }
+  .followup-item .fu-motivo { color: #888; margin-top: 2px; }
+  .followup-item .fu-data { color: #555; margin-top: 2px; font-size: 11px; }
   .learning-count { padding: 8px 16px; font-size: 12px; color: #555; border-top: 1px solid #2a2a2a; }
+  .tabs { display: flex; border-bottom: 1px solid #2a2a2a; }
+  .tab { padding: 8px 12px; font-size: 11px; color: #666; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; }
+  .tab.active { color: #f0a500; border-bottom: 2px solid #f0a500; }
   .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: #444; }
   .loading { text-align: center; padding: 20px; color: #555; font-size: 13px; }
 </style>
@@ -864,6 +958,7 @@ app.get("/painel", (req, res) => {
     <div class="chat-header">
       <div class="chat-phone" id="chatPhone">Selecione uma conversa</div>
       <div class="chat-actions" id="chatActions" style="display:none">
+        <button class="btn btn-followup" onclick="agendarFollowUpManual()">⏰ Follow-up</button>
         <button class="btn btn-secondary" onclick="marcarResolvido()">✓ Resolvido</button>
         <button class="btn btn-danger" onclick="salvarAprendizado()">💡 Aprendizado</button>
       </div>
@@ -880,14 +975,33 @@ app.get("/painel", (req, res) => {
     </div>
   </div>
   <div class="learning-panel">
-    <div class="learning-header">💡 Base de Aprendizado</div>
-    <div class="learning-list" id="learningList"><div class="loading">Carregando...</div></div>
-    <div class="learning-count" id="learningCount"></div>
+    <div class="tabs">
+      <div class="tab active" onclick="mostrarAba('aprendizados', this)">💡 Aprendizados</div>
+      <div class="tab" onclick="mostrarAba('followups', this)">⏰ Follow-ups</div>
+    </div>
+    <div id="abaAprendizados">
+      <div class="learning-list" id="learningList"><div class="loading">Carregando...</div></div>
+      <div class="learning-count" id="learningCount"></div>
+    </div>
+    <div id="abaFollowups" style="display:none">
+      <div class="learning-list" id="followupList"><div class="loading">Carregando...</div></div>
+      <div class="learning-count" id="followupCount"></div>
+    </div>
   </div>
 </div>
 <script>
 const API = window.location.origin;
 let conversaAtiva = null;
+
+function mostrarAba(aba, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('abaAprendizados').style.display = aba === 'aprendizados' ? 'flex' : 'none';
+  document.getElementById('abaAprendizados').style.flexDirection = 'column';
+  document.getElementById('abaFollowups').style.display = aba === 'followups' ? 'flex' : 'none';
+  document.getElementById('abaFollowups').style.flexDirection = 'column';
+  if (aba === 'followups') carregarFollowups();
+}
 
 function formatarTelefone(num) {
   const n = String(num).replace(/\\D/g, '');
@@ -898,6 +1012,11 @@ function formatarTelefone(num) {
 function formatarHora(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+}
+
+function formatarData(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('pt-BR', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
 }
 
 async function carregarConversas() {
@@ -944,7 +1063,7 @@ async function carregarMensagens(from) {
       '<div class="msg ' + m.tipo + '">' +
       '<div class="msg-label">' + (m.tipo === 'client' ? '👤 Cliente' : m.tipo === 'sara' ? '🤖 Sarah' : '⚡ Você') + '</div>' +
       '<div class="msg-bubble">' + m.texto.replace(/\\n/g, '<br>') + '</div>' +
-      '<div class="msg-meta">' + formatarHora(m.timestamp) + '</div></div>'
+      '<div class="msg-meta">' + formatarHora(m.criado_em || m.timestamp) + '</div></div>'
     ).join('');
     msgs.scrollTop = msgs.scrollHeight;
   } catch(e) {}
@@ -963,6 +1082,22 @@ async function enviarIntervencao() {
     document.getElementById('interventionText').value = '';
     await carregarMensagens(conversaAtiva);
   }
+}
+
+async function agendarFollowUpManual() {
+  if (!conversaAtiva) return;
+  const motivos = ['vai_pensar', 'achou_caro', 'avaliacao_baixa', 'sem_interesse'];
+  const motivo = prompt('Motivo do follow-up:\\n1. vai_pensar\\n2. achou_caro\\n3. avaliacao_baixa\\n4. sem_interesse\\n\\nDigite o motivo:');
+  if (!motivo) return;
+  const dias = prompt('Em quantos dias enviar o follow-up? (ex: 2, 3, 7)');
+  if (!dias) return;
+
+  const res = await fetch(API + '/painel/followup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) })
+  });
+  if (res.ok) alert('Follow-up agendado para ' + dias + ' dias!');
 }
 
 async function salvarAprendizado() {
@@ -1004,10 +1139,39 @@ async function carregarAprendizados() {
       list.innerHTML = '<div class="loading" style="color:#555">Nenhum aprendizado ainda</div>';
       return;
     }
-    list.innerHTML = data.aprendizados.slice(-20).reverse().map(a =>
+    list.innerHTML = data.aprendizados.map(a =>
       '<div class="learning-item"><div class="situation">📌 ' + a.situacao + '</div><div class="correction">✓ ' + a.correcao.substring(0,100) + '</div></div>'
     ).join('');
     document.getElementById('learningCount').textContent = data.aprendizados.length + ' aprendizado(s)';
+  } catch(e) {}
+}
+
+async function carregarFollowups() {
+  try {
+    const res = await fetch(API + '/followups');
+    const data = await res.json();
+    const list = document.getElementById('followupList');
+    if (!data.followups || data.followups.length === 0) {
+      list.innerHTML = '<div class="loading" style="color:#555">Nenhum follow-up agendado</div>';
+      return;
+    }
+    const pendentes = data.followups.filter(f => !f.enviado);
+    const enviados = data.followups.filter(f => f.enviado);
+    list.innerHTML =
+      (pendentes.length > 0 ? '<div style="padding:8px;font-size:11px;color:#f0a500">PENDENTES (' + pendentes.length + ')</div>' : '') +
+      pendentes.map(f =>
+        '<div class="followup-item">' +
+        '<div class="fu-phone">' + formatarTelefone(f.telefone) + '</div>' +
+        '<div class="fu-motivo">📌 ' + f.motivo + (f.veiculo_interesse ? ' — ' + f.veiculo_interesse : '') + '</div>' +
+        '<div class="fu-data">⏰ ' + formatarData(f.agendado_para) + '</div></div>'
+      ).join('') +
+      (enviados.length > 0 ? '<div style="padding:8px;font-size:11px;color:#555">ENVIADOS (' + enviados.length + ')</div>' : '') +
+      enviados.slice(0,5).map(f =>
+        '<div class="followup-item" style="opacity:0.5">' +
+        '<div class="fu-phone">' + formatarTelefone(f.telefone) + ' ✓</div>' +
+        '<div class="fu-motivo">' + f.motivo + '</div></div>'
+      ).join('');
+    document.getElementById('followupCount').textContent = pendentes.length + ' pendente(s)';
   } catch(e) {}
 }
 
@@ -1031,12 +1195,12 @@ setInterval(atualizar, 5000);
 });
 
 app.get("/painel/conversas", async (req, res) => {
-  try { res.json({ conversas: await listarConversasSheets() }); }
+  try { res.json({ conversas: await listarConversas() }); }
   catch (e) { res.json({ conversas: [] }); }
 });
 
 app.get("/painel/mensagens/:from", async (req, res) => {
-  try { res.json({ mensagens: await buscarMensagensSheets(req.params.from) }); }
+  try { res.json({ mensagens: await buscarMensagens(req.params.from) }); }
   catch (e) { res.json({ mensagens: [] }); }
 });
 
@@ -1051,7 +1215,7 @@ app.post("/painel/intervencao", async (req, res) => {
     );
     if (!conversas[from]) conversas[from] = [];
     conversas[from].push({ role: "assistant", content: texto });
-    await salvarMensagemSheets(from, "intervencao", texto);
+    await salvarMensagem(from, "intervencao", texto);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1062,7 +1226,7 @@ app.post("/painel/aprendizado", async (req, res) => {
   const { situacao, correcao } = req.body;
   if (!situacao || !correcao) return res.status(400).json({ erro: "Dados inválidos" });
   try {
-    await sheetsAppend("Aprendizados!A:C", [[new Date().toISOString(), situacao, correcao]]);
+    await salvarAprendizado(situacao, correcao);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1070,8 +1234,19 @@ app.post("/painel/aprendizado", async (req, res) => {
 });
 
 app.get("/painel/aprendizados", async (req, res) => {
-  try { res.json({ aprendizados: await buscarAprendizadosSheets() }); }
+  try { res.json({ aprendizados: await buscarAprendizados() }); }
   catch (e) { res.json({ aprendizados: [] }); }
+});
+
+app.post("/painel/followup", async (req, res) => {
+  const { from, motivo, dias } = req.body;
+  if (!from || !motivo || !dias) return res.status(400).json({ erro: "Dados inválidos" });
+  try {
+    await agendarFollowUp(from, motivo, null, dias);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.post("/painel/resolver", async (req, res) => {
