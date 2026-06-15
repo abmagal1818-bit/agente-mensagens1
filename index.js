@@ -531,11 +531,22 @@ async function analisarImagem(mediaId, caption) {
 // ─────────────────────────────────────────────
 
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
-  const t = texto.toLowerCase();
+  const t = texto.toLowerCase().trim();
 
-  // Se cliente está em fluxo de avaliação de troca, NÃO envia fotos do estoque
+  // Se cliente está em fluxo de troca, NÃO envia fotos do estoque
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
 
+  // Detecta "sim/quero/pode/manda" quando Sarah ofereceu fotos na última mensagem
+  const ultimaResposta = (historicoConversa || [])
+    .filter(m => m.role === "assistant")
+    .slice(-1)[0]?.content || "";
+
+  const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
+  if (confirmacoesSimples.includes(t) && ultimaResposta.toLowerCase().includes("foto")) {
+    return true;
+  }
+
+  // Frases que NÃO são pedido de fotos do estoque
   const naoEPedido = [
     "te mando", "vou mandar", "vou te mandar", "ja mando", "já mando",
     "mando agora", "mando foto", "mandando foto", "vou enviar",
@@ -543,6 +554,7 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   ];
   if (naoEPedido.some(p => t.includes(p))) return false;
 
+  // Frases que SÃO pedido de fotos do estoque
   const ePedido = [
     "tem foto", "tem fotos", "manda foto", "manda as foto",
     "pode mandar foto", "me manda foto", "me passa foto",
@@ -561,6 +573,13 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     .filter(m => m.role === "user").slice(-8).map(m => m.content)
   ].join(" ").toLowerCase();
 
+  // Também considera a última resposta da Sarah para pegar o veículo mencionado
+  const ultimaResposta = (historicoConversa || [])
+    .filter(m => m.role === "assistant")
+    .slice(-1)[0]?.content || "";
+
+  const contextoCompleto = contexto + " " + ultimaResposta.toLowerCase();
+
   let melhorMatch = null;
   let melhorScore = 0;
 
@@ -568,8 +587,8 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     const modelo = limparTexto(v.modelo || "").toLowerCase();
     const palavras = modelo.split(/\s+/).filter(p => p.length > 2);
     let score = 0;
-    for (const p of palavras) { if (contexto.includes(p)) score++; }
-    if (v.ano && contexto.includes(String(v.ano))) score += 2;
+    for (const p of palavras) { if (contextoCompleto.includes(p)) score++; }
+    if (v.ano && contextoCompleto.includes(String(v.ano))) score += 2;
     if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
   }
   return melhorScore >= 1 ? melhorMatch : null;
@@ -628,7 +647,9 @@ REGRAS DE PREÇO:
 - NUNCA altere, arredonde ou invente preços
 
 FOTOS DOS VEÍCULOS:
-- Quando o sistema confirmar que fotos foram enviadas, diga naturalmente: "Mandei as fotos pra você! O que achou?"
+- Quando o sistema confirmar que fotos foram enviadas, diga: "Mandei as fotos pra você! O que achou? 😊"
+- NUNCA escreva tags XML como <request_photos> ou similares
+- NUNCA diga que vai "solicitar", "buscar" ou "pedir" as fotos
 - NUNCA diga que enviou fotos se o sistema não confirmou
 - Se não tiver fotos: "Entre em contato pelo (51) 99364-2476 ou venha visitar!"
 
@@ -663,8 +684,7 @@ NUNCA encerre a conversa imediatamente. Sempre tente entender o motivo:
 - "Entendo! Posso perguntar o que ficou na dúvida? É o valor, as condições de financiamento ou algo específico do carro?"
 - Se for preço: ofereça simulação diferente ou outro veículo similar
 - Se for avaliação de troca: reforce que a avaliação presencial pode ser melhor
-- Se insistir em pensar: "Sem problema! Fico à disposição. 😊 O carro pode ser vendido, então avise quando puder!"
-- Agende mentalmente que o sistema vai fazer follow-up automático
+- Se insistir em pensar: "Sem problema! Fico à disposição. 😊 O carro pode ser vendido rapidinho, então avise quando puder!"
 
 SIMULAÇÃO DE FINANCIAMENTO:
 Taxa 1,8%/mês. Fórmula: PMT = PV × (i×(1+i)^n)/((1+i)^n-1)
@@ -682,14 +702,14 @@ REGRAS:
 - Humano: (51) 99364-2476
 - NUNCA invente links ou URLs
 - NUNCA invente informações de estoque
-- NUNCA pergunte sobre financiamento sem o cliente mencionar${aprendizadosExtra}`;
+- NUNCA pergunte sobre financiamento sem o cliente mencionar
+- NUNCA use tags XML ou HTML nas respostas${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
 // PROCESSAMENTO DE MENSAGENS
 // ─────────────────────────────────────────────
 
 async function processarMensagem(from, text) {
-  // Proteção contra texto undefined
   if (!text || typeof text !== "string") {
     console.error(`[Erro] Texto inválido de ${from}:`, text);
     return;
@@ -705,7 +725,6 @@ async function processarMensagem(from, text) {
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
 
   // Detecta pedido de fotos DO ESTOQUE
-  // NÃO envia fotos do estoque se cliente está em fluxo de avaliação de troca
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const ultimasMensagens = conversas[from].slice(-6).map(m => m.content || "").join(" ");
   const jaEnviouFotos = ultimasMensagens.includes("[Sistema: fotos enviadas");
