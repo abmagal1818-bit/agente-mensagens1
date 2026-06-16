@@ -1285,7 +1285,7 @@ async function carregarKanban() {
 
     let total = 0;
     Object.values(data).forEach(c => total += c.length);
-    document.getElementById('statusText').textContent = total + ' leads' + (numPendencias > 0 ? ` • 🔔 ${numPendencias} desconto(s)` : '');
+    document.getElementById('statusText').textContent = total + ' leads' + (numPendencias > 0 ? ' \u2022 \uD83D\uDD14 ' + numPendencias + ' desconto(s)' : '');
 
     document.getElementById('kanbanBoard').innerHTML = COLUNAS.map(col => {
       const cards = data[col.id] || [];
