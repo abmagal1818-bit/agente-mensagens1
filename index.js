@@ -60,6 +60,13 @@ const conversasVisualizadas = {};
 const ultimaMensagemCliente = {};
 
 // ─────────────────────────────────────────────
+// PENDÊNCIAS DE DESCONTO
+// Armazena descontos aguardando autorização
+// ─────────────────────────────────────────────
+const pendenciasDesconto = {};
+// Formato: { [telefoneCliente]: { precoOriginal, precoSolicitado, veiculo, timestamp } }
+
+// ─────────────────────────────────────────────
 // CACHE DE APRENDIZADOS
 // ─────────────────────────────────────────────
 let cacheAprendizados = "";
@@ -77,7 +84,6 @@ async function obterAprendizados() {
       cacheAprendizados = "";
     }
     ultimoCarregamentoAprendizados = agora;
-    console.log(`[Cache] Aprendizados: ${data?.length || 0} itens`);
   } catch (e) { console.error("[Cache] Erro:", e.message); }
   return cacheAprendizados;
 }
@@ -110,6 +116,176 @@ function ehMensagemSimples(texto) {
     "tá", "ta", "tá bom", "ta bom", "pode ser", "claro", "perfeito", "ótimo", "otimo",
     "entendi", "entendido", "combinado", "até", "ate", "tchau", "abraço", "abs"];
   return simples.includes(t) || t.length < 8;
+}
+
+// ─────────────────────────────────────────────
+// DETECÇÃO DE PEDIDO DE DESCONTO
+// ─────────────────────────────────────────────
+
+function detectarPedidoDesconto(texto, historicoConversa) {
+  const t = texto.toLowerCase();
+  const frasesDesconto = [
+    "consegue baixar", "pode baixar", "tem desconto", "dá desconto",
+    "aceita menos", "fecha por menos", "consegue por", "fecha por",
+    "e por", "sai por", "e por menos", "aceita", "toparia",
+    "pago à vista", "pago a vista", "pago em dinheiro", "pago no pix"
+  ];
+
+  // Verifica se tem pedido de desconto E menção de valor diferente
+  const temFraseDesconto = frasesDesconto.some(f => t.includes(f));
+  const temValor = /r\$\s*[\d.,]+|[\d.,]+\s*mil/i.test(t);
+
+  return temFraseDesconto || (temValor && (t.includes("à vista") || t.includes("a vista") || t.includes("pix") || t.includes("dinheiro")));
+}
+
+async function extrairInfoDesconto(texto, historicoConversa) {
+  try {
+    const contexto = (historicoConversa || []).slice(-8).map(m => m.content || "").join(" ");
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-haiku-4-5",
+        max_tokens: 200,
+        messages: [{
+          role: "user",
+          content: `Analise essa conversa e extraia informações sobre pedido de desconto.
+Responda APENAS em JSON:
+{"veiculo": "...", "precoOriginal": 0, "precoSolicitado": 0, "formaPagamento": "..."}
+
+Se não encontrar algum valor, coloque null.
+
+Contexto da conversa: "${contexto}"
+Última mensagem: "${texto}"`
+        }]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+    const jsonMatch = res.data.content[0].text.trim().match(/\{[\s\S]+\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+  } catch (e) { return null; }
+}
+
+async function solicitarAutorizacaoDesconto(from, infoDesconto) {
+  const numero = from.replace(/\D/g, "");
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
+
+  const precoOriginal = infoDesconto.precoOriginal ? `R$ ${Number(infoDesconto.precoOriginal).toLocaleString("pt-BR")}` : "não identificado";
+  const precoSolicitado = infoDesconto.precoSolicitado ? `R$ ${Number(infoDesconto.precoSolicitado).toLocaleString("pt-BR")}` : "não identificado";
+  const veiculo = infoDesconto.veiculo || "veículo";
+  const forma = infoDesconto.formaPagamento || "não informado";
+
+  const mensagem = `🔔 *Solicitação de desconto*\n\nCliente: ${formatado}\nVeículo: *${veiculo}*\nPreço tabela: ${precoOriginal}\nCliente quer: *${precoSolicitado}*\nPagamento: ${forma}\n\nResponda:\n✅ *AUTORIZO ${from}*\n❌ *NEGO ${from}*`;
+
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[Desconto] ✅ Solicitação enviada para Augusto — cliente: ${from}`);
+
+    // Salva pendência
+    pendenciasDesconto[from] = {
+      ...infoDesconto,
+      timestamp: Date.now()
+    };
+  } catch (e) {
+    console.error(`[Desconto] Erro ao solicitar:`, e.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// PROCESSAR COMANDOS DO AUGUSTO
+// ─────────────────────────────────────────────
+
+async function processarComandoAugusto(texto) {
+  const t = texto.trim().toUpperCase();
+
+  // Comando: AUTORIZO 5551999...
+  const matchAutorizo = t.match(/^AUTORIZO\s+(\d+)/);
+  if (matchAutorizo) {
+    const telefoneCliente = matchAutorizo[1];
+    const pendencia = pendenciasDesconto[telefoneCliente];
+
+    if (!pendencia) {
+      await enviarMensagem(NUMERO_AUGUSTO, `⚠️ Não encontrei pendência de desconto para o número ${telefoneCliente}`);
+      return;
+    }
+
+    delete pendenciasDesconto[telefoneCliente];
+
+    const precoAutorizado = pendencia.precoSolicitado
+      ? `R$ ${Number(pendencia.precoSolicitado).toLocaleString("pt-BR")}`
+      : "o valor solicitado";
+
+    // Responde ao cliente
+    const respostaCliente = `Boa notícia! ✅ Consegui autorização aqui e fechamos o *${pendencia.veiculo || "veículo"}* por *${precoAutorizado}* pra você! 🎉\n\nQuando você consegue vir aqui na loja? Estamos na Av. Aparício Borges, 931!`;
+
+    if (!conversas[telefoneCliente]) conversas[telefoneCliente] = [];
+    conversas[telefoneCliente].push({ role: "assistant", content: respostaCliente });
+
+    await enviarMensagem(telefoneCliente, respostaCliente);
+    await salvarMensagem(telefoneCliente, "sara", respostaCliente);
+    await atualizarEstagio(telefoneCliente, "negociacao");
+
+    await enviarMensagem(NUMERO_AUGUSTO, `✅ Desconto autorizado! Sarah avisou o cliente.`);
+    console.log(`[Desconto] ✅ Autorizado para ${telefoneCliente}`);
+    return;
+  }
+
+  // Comando: NEGO 5551999...
+  const matchNego = t.match(/^NEGO\s+(\d+)/);
+  if (matchNego) {
+    const telefoneCliente = matchNego[1];
+    const pendencia = pendenciasDesconto[telefoneCliente];
+
+    if (!pendencia) {
+      await enviarMensagem(NUMERO_AUGUSTO, `⚠️ Não encontrei pendência de desconto para o número ${telefoneCliente}`);
+      return;
+    }
+
+    delete pendenciasDesconto[telefoneCliente];
+
+    const precoOriginal = pendencia.precoOriginal
+      ? `R$ ${Number(pendencia.precoOriginal).toLocaleString("pt-BR")}`
+      : "o valor de tabela";
+
+    // Responde ao cliente
+    const respostaCliente = `Consultei aqui e infelizmente não conseguimos trabalhar abaixo de *${precoOriginal}* nesse veículo. 😕\n\nMas posso te ajudar a simular um financiamento que caiba no seu bolso! Quantas parcelas você toparia?`;
+
+    if (!conversas[telefoneCliente]) conversas[telefoneCliente] = [];
+    conversas[telefoneCliente].push({ role: "assistant", content: respostaCliente });
+
+    await enviarMensagem(telefoneCliente, respostaCliente);
+    await salvarMensagem(telefoneCliente, "sara", respostaCliente);
+
+    await enviarMensagem(NUMERO_AUGUSTO, `❌ Desconto negado. Sarah avisou o cliente e ofereceu financiamento.`);
+    console.log(`[Desconto] ❌ Negado para ${telefoneCliente}`);
+    return;
+  }
+
+  // Comando: PENDENCIAS — lista pendências ativas
+  if (t === "PENDENCIAS" || t === "PENDÊNCIAS") {
+    const lista = Object.entries(pendenciasDesconto);
+    if (lista.length === 0) {
+      await enviarMensagem(NUMERO_AUGUSTO, "✅ Nenhuma pendência de desconto no momento.");
+      return;
+    }
+    const texto2 = `📋 *Pendências de desconto:*\n\n` + lista.map(([tel, p]) => {
+      const minutos = Math.floor((Date.now() - p.timestamp) / 60000);
+      return `• ${tel}\n  Veículo: ${p.veiculo || "?"}\n  Valor: R$ ${p.precoSolicitado || "?"}\n  Há ${minutos} min`;
+    }).join("\n\n");
+    await enviarMensagem(NUMERO_AUGUSTO, texto2);
+    return;
+  }
+}
+
+async function enviarMensagem(to, texto) {
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to, text: { body: texto } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+  } catch (e) { console.error(`[Envio] Erro para ${to}:`, e.message); }
 }
 
 // ─────────────────────────────────────────────
@@ -153,7 +329,6 @@ Texto: "${textos.slice(-5).join(" | ")}"`
       anoBuscado: json.busca?.ano || null
     };
   } catch (e) {
-    console.error("[Extração] Erro:", e.message);
     return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
   }
 }
@@ -302,7 +477,7 @@ async function detectarLeadFrio(from, text, historicoConversa) {
     const frasesSemInteresse = ["não tenho interesse", "desisti", "não quero mais", "mudei de ideia", "cancelar", "esquece", "deixa pra lá"];
     if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; dias = 7; }
     if (!motivo) return;
-    const vm = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
+    const vm = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|palio/i);
     await agendarFollowUp(from, motivo, vm ? vm[0] : null, dias);
   } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
@@ -315,7 +490,7 @@ async function verificarClientesSumidos() {
         const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
         if (!data?.length) {
           const hist = (conversas[telefone] || []).map(m => m.content || "").join(" ").toLowerCase();
-          const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
+          const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|palio/i);
           await agendarFollowUp(telefone, "sumiu", vm ? vm[0] : null, 5);
           await atualizarEstagio(telefone, "frio");
         }
@@ -353,10 +528,7 @@ async function processarFollowUpsPendentes() {
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
       try {
-        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-          { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-        );
+        await enviarMensagem(followup.telefone, mensagem);
         await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
         await salvarMensagem(followup.telefone, "sara", mensagem);
         if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
@@ -383,10 +555,7 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
   const mensagem = `${primeiraVez ? "🆕 *Novo cliente*" : "📩 *Mensagem*"}\nNúmero: ${formatado}\n"${String(texto).substring(0, 100)}"\n\nhttps://agente-mensagens1.onrender.com/painel`;
   try {
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
+    await enviarMensagem(NUMERO_AUGUSTO, mensagem);
     console.log(`[Notificação] ✅ ${primeiraVez ? "Novo" : "Update"} — ${formatado}`);
   } catch (e) { console.error(`[Notificação] Erro:`, e.message); }
 }
@@ -395,16 +564,11 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
   const numero = from.replace(/\D/g, "");
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
   const mensagem = `🔍 *Carro não disponível*\nCliente: ${formatado}\nProcura: *${modeloBuscado}*\n${infoCliente ? `Info: ${infoCliente}` : ""}`;
-  try {
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
-  } catch (e) { console.error(`[Notificação] Erro carro:`, e.message); }
+  await enviarMensagem(NUMERO_AUGUSTO, mensagem);
 }
 
 // ─────────────────────────────────────────────
-// INSTAGRAM — SINCRONIZAÇÃO A CADA 30 MIN
+// INSTAGRAM
 // ─────────────────────────────────────────────
 
 async function buscarEstoqueInstagram() {
@@ -452,7 +616,7 @@ async function sincronizarEstoque() {
 sincronizarEstoque();
 setInterval(sincronizarEstoque, 30 * 60 * 1000);
 
-// Keep Alive — mantém servidor acordado
+// Keep Alive
 setInterval(async () => {
   try {
     await axios.get("https://agente-mensagens1.onrender.com");
@@ -599,7 +763,18 @@ PERFIL: Simpática, descontraída e profissional. Máximo 4 linhas por resposta.
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
 
-REGRAS DE PREÇO: Use EXATAMENTE os preços do estoque. NUNCA invente ou altere.
+REGRAS DE PREÇO:
+- Use EXATAMENTE os preços do estoque acima
+- NUNCA altere, arredonde ou invente preços
+- Se cliente mencionar preço diferente do estoque, confirme o preço correto do estoque
+
+NEGOCIAÇÃO DE DESCONTO:
+- NUNCA aceite, ofereça ou confirme desconto por conta própria
+- NUNCA diga "vou consultar o gerente" e volte com resposta de desconto
+- Quando cliente pedir desconto ou preço menor, diga EXATAMENTE:
+  "Deixa eu verificar com nosso consultor se conseguimos esse valor pra você! Um momento 😊"
+- O sistema vai notificar o consultor automaticamente
+- Aguarde — a resposta virá pelo sistema
 
 ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
 1. Informe que não está disponível no momento
@@ -607,7 +782,10 @@ ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNa
 3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
 4. Só ofereça alternativas se tiver algo REALMENTE similar` : ""}
 
-FOTOS: Quando sistema confirmar envio, diga: "Mandei as fotos! O que achou? 😊". NUNCA use tags XML. NUNCA diga que enviou sem confirmação.
+FOTOS:
+- Quando sistema confirmar envio, diga: "Mandei as fotos! O que achou? 😊"
+- NUNCA use tags XML como <attempt_photo_send> ou similares
+- NUNCA diga que enviou sem confirmação do sistema
 
 PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórcio, À vista
 
@@ -626,10 +804,11 @@ REGRAS ABSOLUTAS:
 - Primeira msg: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
 - Máximo 4 linhas
 - NUNCA pergunte sobre financiamento sem o cliente mencionar
-- NUNCA invente links ou use tags XML${aprendizadosExtra}`;
+- NUNCA invente links ou use tags XML
+- NUNCA negocie preço sem autorização do consultor${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
-// PROCESSAMENTO OTIMIZADO
+// PROCESSAMENTO
 // ─────────────────────────────────────────────
 
 async function processarMensagem(from, text) {
@@ -646,6 +825,20 @@ async function processarMensagem(from, text) {
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
   detectarEstagio(from, text, conversas[from]).catch(() => {});
+
+  // Detecta pedido de desconto
+  if (detectarPedidoDesconto(text, conversas[from])) {
+    console.log(`[Desconto] Pedido detectado de ${from}`);
+    const infoDesconto = await extrairInfoDesconto(text, conversas[from]);
+    if (infoDesconto) {
+      await solicitarAutorizacaoDesconto(from, infoDesconto);
+      const respostaSarah = "Deixa eu verificar com nosso consultor se conseguimos esse valor pra você! Um momento 😊";
+      conversas[from].push({ role: "assistant", content: respostaSarah });
+      await enviarMensagem(from, respostaSarah);
+      await salvarMensagem(from, "sara", respostaSarah);
+      return;
+    }
+  }
 
   // Extração unificada — 1 chamada Haiku
   const isSimples = ehMensagemSimples(text);
@@ -687,7 +880,6 @@ async function processarMensagem(from, text) {
     fipeInfo = await consultarFipe(marcaTroca, modeloTroca, anoTroca);
   }
 
-  // Aprendizados do cache
   const aprendizadosExtra = await obterAprendizados();
 
   // Resposta principal — Sonnet
@@ -704,11 +896,7 @@ async function processarMensagem(from, text) {
   const reply = claude.data.content[0].text;
   conversas[from].push({ role: "assistant", content: reply });
 
-  await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-    { messaging_product: "whatsapp", to: from, text: { body: reply } },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-  );
-
+  await enviarMensagem(from, reply);
   console.log(`Resposta para ${from}: ${reply}`);
   await salvarMensagem(from, "sara", reply);
 }
@@ -749,12 +937,12 @@ app.get("/followups", async (req, res) => {
     res.json({ followups: data || [] });
   } catch (e) { res.json({ followups: [] }); }
 });
+app.get("/pendencias", (req, res) => {
+  res.json({ pendencias: pendenciasDesconto });
+});
 app.get("/testar-notificacao", async (req, res) => {
   try {
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: "✅ Sarah funcionando!" } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
+    await enviarMensagem(NUMERO_AUGUSTO, "✅ Sarah funcionando!");
     res.json({ ok: true });
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
@@ -775,7 +963,19 @@ app.post("/webhook", async (req, res) => {
     mensagensProcessadas.add(msgId);
     setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
     const from = msg.from;
+
     try {
+      // ── MENSAGEM DO AUGUSTO — processa comandos ──
+      if (from === NUMERO_AUGUSTO) {
+        const text = msg.text?.body;
+        if (text) {
+          console.log(`[Augusto] Mensagem recebida: ${text}`);
+          await processarComandoAugusto(text);
+        }
+        return;
+      }
+
+      // ── MENSAGEM DE CLIENTE ──
       if (msg.type === "text") {
         const text = msg.text?.body;
         if (!text) return;
@@ -784,10 +984,7 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "audio") {
         const texto = await transcreverAudio(msg.audio.id);
         if (texto) await processarMensagem(from, `[Áudio]: ${texto}`);
-        else await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-          { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-        );
+        else await enviarMensagem(from, "Não consegui entender o áudio. Pode digitar?");
       } else if (msg.type === "image") {
         const caption = msg.image?.caption || "";
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
@@ -852,8 +1049,6 @@ header h1 span { color:#f0a500; }
 .nav-tab.active { background:#1e1e1e; color:#f0a500; border-color:#333; }
 .view { display:none; flex:1; overflow:hidden; flex-direction:column; }
 .view.active { display:flex; }
-
-/* KANBAN */
 .kanban { display:flex; gap:10px; padding:12px; overflow-x:auto; flex:1; -webkit-overflow-scrolling:touch; }
 .kanban::-webkit-scrollbar { height:4px; }
 .kanban::-webkit-scrollbar-thumb { background:#333; border-radius:2px; }
@@ -879,8 +1074,6 @@ header h1 span { color:#f0a500; }
 .card-btn-chat { background:#1e2a1e; color:#81c784; }
 .card-btn-followup { background:#1a1e2a; color:#64b5f6; }
 .card-btn-mover { background:#1e1e1e; color:#888; }
-
-/* CHAT */
 .chat-view { flex:1; display:flex; overflow:hidden; }
 .chat-sidebar { width:240px; background:#111; border-right:1px solid #1e1e1e; display:flex; flex-direction:column; flex-shrink:0; }
 .chat-sidebar-header { padding:9px 13px; font-size:10px; color:#666; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid #1a1a1a; }
@@ -938,8 +1131,7 @@ header h1 span { color:#f0a500; }
 .tag-fechado { background:#1a0a2a; color:#ce93d8; }
 .empty-state { flex:1; display:flex; align-items:center; justify-content:center; color:#333; font-size:12px; }
 .loading-txt { text-align:center; padding:14px; color:#444; font-size:11px; }
-
-/* Mobile: esconde sidebar em telas pequenas quando chat aberto */
+.pendencia-badge { background:#ff6b35; color:#fff; font-size:9px; padding:1px 5px; border-radius:8px; margin-left:4px; }
 @media (max-width: 600px) {
   .chat-sidebar { width:100%; }
   .chat-sidebar.oculta { display:none; }
@@ -1039,12 +1231,9 @@ const COLUNAS = [
   { id: 'fechado', titulo: '✅ Fechado', classe: 'coluna-fechado' }
 ];
 
-// Service Worker
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js')
-      .then(r => console.log('SW OK:', r.scope))
-      .catch(e => console.log('SW erro:', e));
+    navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW erro:', e));
   });
 }
 
@@ -1086,13 +1275,19 @@ function formatarHora(iso) {
 
 async function carregarKanban() {
   try {
-    const res = await fetch(API + '/crm');
-    const data = await res.json();
-    const board = document.getElementById('kanbanBoard');
+    const [crmRes, pendRes] = await Promise.all([
+      fetch(API + '/crm'),
+      fetch(API + '/pendencias')
+    ]);
+    const data = await crmRes.json();
+    const pendData = await pendRes.json();
+    const numPendencias = Object.keys(pendData.pendencias || {}).length;
+
     let total = 0;
     Object.values(data).forEach(c => total += c.length);
-    document.getElementById('statusText').textContent = total + ' leads';
-    board.innerHTML = COLUNAS.map(col => {
+    document.getElementById('statusText').textContent = total + ' leads' + (numPendencias > 0 ? ` • 🔔 ${numPendencias} desconto(s)` : '');
+
+    document.getElementById('kanbanBoard').innerHTML = COLUNAS.map(col => {
       const cards = data[col.id] || [];
       return \`<div class="coluna \${col.classe}">
         <div class="coluna-header">
@@ -1102,17 +1297,20 @@ async function carregarKanban() {
         <div class="coluna-cards">
           \${cards.length === 0
             ? '<div style="padding:8px;text-align:center;color:#333;font-size:10px">Vazio</div>'
-            : cards.map(c => \`<div class="card">
-                <div class="card-phone">\${c.formatado}</div>
-                \${c.veiculo ? \`<div class="card-veiculo">🚗 \${c.veiculo}</div>\` : ''}
-                <div class="card-preview">\${c.ultimaMensagem || '—'}</div>
-                <div class="card-tempo">\${c.tempoLabel}</div>
-                <div class="card-acoes">
-                  <button class="card-btn card-btn-chat" onclick="abrirChatDoCard('\${c.telefone}')">💬</button>
-                  <button class="card-btn card-btn-followup" onclick="followUpRapido('\${c.telefone}')">⏰</button>
-                  <button class="card-btn card-btn-mover" onclick="moverRapido('\${c.telefone}')">↕</button>
-                </div>
-              </div>\`).join('')}
+            : cards.map(c => {
+                const temPendencia = pendData.pendencias?.[c.telefone];
+                return \`<div class="card">
+                  <div class="card-phone">\${c.formatado}\${temPendencia ? '<span class="pendencia-badge">🔔 Desconto</span>' : ''}</div>
+                  \${c.veiculo ? \`<div class="card-veiculo">🚗 \${c.veiculo}</div>\` : ''}
+                  <div class="card-preview">\${c.ultimaMensagem || '—'}</div>
+                  <div class="card-tempo">\${c.tempoLabel}</div>
+                  <div class="card-acoes">
+                    <button class="card-btn card-btn-chat" onclick="abrirChatDoCard('\${c.telefone}')">💬</button>
+                    <button class="card-btn card-btn-followup" onclick="followUpRapido('\${c.telefone}')">⏰</button>
+                    <button class="card-btn card-btn-mover" onclick="moverRapido('\${c.telefone}')">↕</button>
+                  </div>
+                </div>\`;
+              }).join('')}
         </div>
       </div>\`;
     }).join('');
@@ -1282,10 +1480,7 @@ app.post("/painel/intervencao", async (req, res) => {
   const { from, texto } = req.body;
   if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
   try {
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: from, text: { body: texto } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
+    await enviarMensagem(from, texto);
     if (!conversas[from]) conversas[from] = [];
     conversas[from].push({ role: "assistant", content: texto });
     await salvarMensagem(from, "intervencao", texto);
