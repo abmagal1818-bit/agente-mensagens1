@@ -28,17 +28,13 @@ console.log("SUPABASE_KEY:", SUPABASE_KEY ? "OK" : "VAZIA");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Testa conexão com Supabase na inicialização
 async function testarSupabase() {
   try {
     const { data, error } = await supabase.from("mensagens").select("count").limit(1);
-    if (error) {
-      console.error("[Supabase] ❌ Erro de conexão:", error.message, JSON.stringify(error));
-    } else {
-      console.log("[Supabase] ✅ Conexão OK!");
-    }
+    if (error) console.error("[Supabase] ❌ Erro de conexão:", error.message);
+    else console.log("[Supabase] ✅ Conexão OK!");
   } catch (e) {
-    console.error("[Supabase] ❌ Exceção na conexão:", e.message);
+    console.error("[Supabase] ❌ Exceção:", e.message);
   }
 }
 testarSupabase();
@@ -69,16 +65,11 @@ function limparTexto(str) {
 }
 
 function clienteEstaEmFluxoTroca(historicoConversa) {
-  const historico = (historicoConversa || [])
-    .slice(-10)
-    .map(m => m.content || "")
-    .join(" ")
-    .toLowerCase();
+  const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
   return historico.includes("tenho um") || historico.includes("meu carro") ||
-    historico.includes("quero vender") || historico.includes("na troca") ||
-    historico.includes("pra troca") || historico.includes("dar na troca") ||
-    historico.includes("mandar umas fotos") || historico.includes("manda umas fotos") ||
-    historico.includes("consegue mandar fotos");
+    historico.includes("na troca") || historico.includes("pra troca") ||
+    historico.includes("dar na troca") || historico.includes("mandar umas fotos") ||
+    historico.includes("manda umas fotos");
 }
 
 // ─────────────────────────────────────────────
@@ -88,24 +79,16 @@ function clienteEstaEmFluxoTroca(historicoConversa) {
 async function salvarMensagem(telefone, tipo, texto) {
   try {
     console.log(`[Supabase] Salvando mensagem: ${telefone} | ${tipo}`);
-    const { data, error } = await supabase.from("mensagens").insert({
-      telefone,
-      tipo,
-      texto: String(texto).substring(0, 500)
+    const { error } = await supabase.from("mensagens").insert({
+      telefone, tipo, texto: String(texto).substring(0, 500)
     });
-    if (error) {
-      console.error("[Supabase] ❌ Erro insert:", error.message, JSON.stringify(error));
-    } else {
-      console.log(`[Supabase] ✅ Mensagem salva: ${telefone} | ${tipo}`);
-    }
+    if (error) console.error("[Supabase] ❌ Erro insert:", error.message, JSON.stringify(error));
+    else console.log(`[Supabase] ✅ Mensagem salva: ${telefone} | ${tipo}`);
 
-    const { error: error2 } = await supabase.from("clientes").upsert({
-      telefone,
-      ultima_interacao: new Date().toISOString()
+    const { error: e2 } = await supabase.from("clientes").upsert({
+      telefone, ultima_interacao: new Date().toISOString()
     }, { onConflict: "telefone" });
-    if (error2) {
-      console.error("[Supabase] ❌ Erro upsert cliente:", error2.message);
-    }
+    if (e2) console.error("[Supabase] ❌ Erro upsert cliente:", e2.message);
   } catch (e) {
     console.error("[Supabase] ❌ Exceção salvarMensagem:", e.message);
   }
@@ -113,58 +96,130 @@ async function salvarMensagem(telefone, tipo, texto) {
 
 async function buscarMensagens(telefone) {
   try {
-    const { data, error } = await supabase
-      .from("mensagens")
-      .select("*")
-      .eq("telefone", telefone)
-      .order("criado_em", { ascending: true })
-      .limit(100);
-    if (error) console.error("[Supabase] Erro buscarMensagens:", error.message);
+    const { data } = await supabase.from("mensagens").select("*").eq("telefone", telefone).order("criado_em", { ascending: true }).limit(100);
     return data || [];
-  } catch (e) {
-    console.error("[Supabase] Erro buscarMensagens:", e.message);
-    return [];
-  }
+  } catch (e) { return []; }
 }
 
 async function listarConversas() {
   try {
-    const { data, error } = await supabase
-      .from("mensagens")
-      .select("telefone, texto, tipo, criado_em")
-      .order("criado_em", { ascending: false });
-
-    if (error) {
-      console.error("[Supabase] Erro listarConversas:", error.message);
-      return [];
-    }
+    const { data } = await supabase.from("mensagens").select("telefone, texto, tipo, criado_em").order("criado_em", { ascending: false });
     if (!data) return [];
-
     const mapa = {};
     data.forEach(m => {
       if (!mapa[m.telefone]) {
-        mapa[m.telefone] = {
-          from: m.telefone,
-          ultimaMensagem: m.texto?.substring(0, 50) || "",
-          ultimaAtividade: m.criado_em,
-          naoLida: 0
-        };
+        mapa[m.telefone] = { from: m.telefone, ultimaMensagem: m.texto?.substring(0, 50) || "", ultimaAtividade: m.criado_em, naoLida: 0 };
       }
       if (m.tipo === "client") {
         const visualizadoEm = conversasVisualizadas[m.telefone] || 0;
-        const chegouEm = new Date(m.criado_em).getTime();
-        if (chegouEm > visualizadoEm) {
-          mapa[m.telefone].naoLida++;
-        }
+        if (new Date(m.criado_em).getTime() > visualizadoEm) mapa[m.telefone].naoLida++;
       }
     });
+    return Object.values(mapa).sort((a, b) => new Date(b.ultimaAtividade) - new Date(a.ultimaAtividade));
+  } catch (e) { return []; }
+}
 
-    return Object.values(mapa).sort((a, b) =>
-      new Date(b.ultimaAtividade) - new Date(a.ultimaAtividade)
-    );
+// ─────────────────────────────────────────────
+// SUPABASE — CRM ESTÁGIOS
+// ─────────────────────────────────────────────
+
+async function atualizarEstagio(telefone, estagio, veiculo = null) {
+  try {
+    const { error } = await supabase.from("clientes").upsert({
+      telefone,
+      estagio,
+      veiculo_interesse: veiculo,
+      ultima_interacao: new Date().toISOString()
+    }, { onConflict: "telefone" });
+    if (error) console.error("[CRM] Erro atualizarEstagio:", error.message);
+    else console.log(`[CRM] Estágio atualizado: ${telefone} → ${estagio}`);
   } catch (e) {
-    console.error("[Supabase] Erro listarConversas:", e.message);
-    return [];
+    console.error("[CRM] Erro:", e.message);
+  }
+}
+
+async function detectarEstagio(from, text, historico) {
+  const t = text.toLowerCase();
+  const hist = (historico || []).map(m => m.content || "").join(" ").toLowerCase();
+
+  // Fechado
+  if (t.includes("fechei") || t.includes("comprei") || t.includes("fechar negócio") || t.includes("vou comprar")) {
+    await atualizarEstagio(from, "fechado"); return;
+  }
+  // Visita agendada
+  if (t.includes("vou aí") || t.includes("vou até") || t.includes("vou visitar") || t.includes("passo aí") ||
+    t.includes("apareço") || t.includes("amanhã lá") || t.includes("vou na loja")) {
+    await atualizarEstagio(from, "visita_agendada"); return;
+  }
+  // Em negociação — simulou, pediu fotos, avaliou troca
+  if (hist.includes("financiar") || hist.includes("parcela") || hist.includes("simulação") ||
+    hist.includes("na troca") || hist.includes("pra troca") || hist.includes("fotos")) {
+    await atualizarEstagio(from, "negociacao"); return;
+  }
+  // Frio
+  if (t.includes("não tenho interesse") || t.includes("desisti") || t.includes("esquece") || t.includes("não quero mais")) {
+    await atualizarEstagio(from, "frio"); return;
+  }
+  // Aguardando
+  if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) {
+    await atualizarEstagio(from, "aguardando"); return;
+  }
+  // Quente — primeira mensagem ou engajado
+  const { data } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
+  if (!data || !data[0] || !data[0].estagio) {
+    await atualizarEstagio(from, "quente");
+  }
+}
+
+async function buscarLeadsCRM() {
+  try {
+    const { data: clientes } = await supabase.from("clientes").select("*").order("ultima_interacao", { ascending: false });
+    const { data: mensagens } = await supabase.from("mensagens").select("telefone, texto, tipo, criado_em").order("criado_em", { ascending: false });
+
+    if (!clientes) return {};
+
+    const ultimaMsg = {};
+    if (mensagens) {
+      mensagens.forEach(m => { if (!ultimaMsg[m.telefone]) ultimaMsg[m.telefone] = m; });
+    }
+
+    const kanban = { quente: [], negociacao: [], aguardando: [], visita_agendada: [], frio: [], fechado: [] };
+
+    clientes.forEach(c => {
+      const estagio = c.estagio || "quente";
+      const ultima = ultimaMsg[c.telefone];
+      const agora = Date.now();
+      const ultimaAtividade = c.ultima_interacao ? new Date(c.ultima_interacao).getTime() : agora;
+      const minutosAtras = Math.floor((agora - ultimaAtividade) / 60000);
+      const horasAtras = Math.floor(minutosAtras / 60);
+      const diasAtras = Math.floor(horasAtras / 24);
+
+      let tempoLabel = "";
+      if (diasAtras > 0) tempoLabel = `${diasAtras}d atrás`;
+      else if (horasAtras > 0) tempoLabel = `${horasAtras}h atrás`;
+      else tempoLabel = `${minutosAtras}min atrás`;
+
+      const numero = c.telefone.replace(/\D/g, "");
+      const formatado = numero.length >= 12 ? `(${numero.slice(2, 4)}) ${numero.slice(4, 9)}-${numero.slice(9)}` : c.telefone;
+
+      const card = {
+        telefone: c.telefone,
+        formatado,
+        estagio,
+        veiculo: c.veiculo_interesse || "",
+        ultimaMensagem: ultima?.texto?.substring(0, 60) || "",
+        tempoLabel,
+        ultimaAtividade: c.ultima_interacao
+      };
+
+      if (kanban[estagio]) kanban[estagio].push(card);
+      else kanban.quente.push(card);
+    });
+
+    return kanban;
+  } catch (e) {
+    console.error("[CRM] Erro buscarLeadsCRM:", e.message);
+    return {};
   }
 }
 
@@ -174,30 +229,21 @@ async function listarConversas() {
 
 async function salvarAprendizado(situacao, correcao) {
   try {
-    const { error } = await supabase.from("aprendizados").insert({ situacao, correcao });
-    if (error) console.error("[Supabase] Erro salvarAprendizado:", error.message);
-  } catch (e) {
-    console.error("[Supabase] Erro salvarAprendizado:", e.message);
-  }
+    await supabase.from("aprendizados").insert({ situacao, correcao });
+  } catch (e) { console.error("[Supabase] Erro salvarAprendizado:", e.message); }
 }
 
 async function buscarAprendizados() {
   try {
-    const { data } = await supabase
-      .from("aprendizados")
-      .select("*")
-      .order("criado_em", { ascending: false })
-      .limit(20);
+    const { data } = await supabase.from("aprendizados").select("*").order("criado_em", { ascending: false }).limit(20);
     return data || [];
-  } catch (e) {
-    return [];
-  }
+  } catch (e) { return []; }
 }
 
 async function formatarAprendizados() {
   const aprendizados = await buscarAprendizados();
-  if (aprendizados.length === 0) return "";
-  return "\n\nEXEMPLOS DE COMO RESPONDER (aprenda com esses casos):\n" +
+  if (!aprendizados.length) return "";
+  return "\n\nEXEMPLOS DE COMO RESPONDER:\n" +
     aprendizados.slice(0, 10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
 }
 
@@ -209,94 +255,55 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar)
   try {
     const agendadoPara = new Date();
     agendadoPara.setDate(agendadoPara.getDate() + diasAguardar);
-
     await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false);
-
     const { error } = await supabase.from("followups").insert({
-      telefone, motivo,
-      veiculo_interesse: veiculoInteresse,
-      agendado_para: agendadoPara.toISOString(),
-      enviado: false
+      telefone, motivo, veiculo_interesse: veiculoInteresse,
+      agendado_para: agendadoPara.toISOString(), enviado: false
     });
-    if (error) console.error("[Supabase] Erro agendarFollowUp:", error.message);
-    else console.log(`[FollowUp] Agendado para ${telefone} em ${diasAguardar} dias — motivo: ${motivo}`);
-  } catch (e) {
-    console.error("[Supabase] Erro agendarFollowUp:", e.message);
-  }
+    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${diasAguardar} dias — ${motivo}`);
+  } catch (e) { console.error("[FollowUp] Erro agendarFollowUp:", e.message); }
 }
 
 async function detectarLeadFrio(from, text, historicoConversa) {
   try {
     const t = text.toLowerCase();
     const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
+    let motivo = null, dias = 1;
 
-    let motivo = null;
-    let diasAguardar = 1;
+    const frasesPensar = ["vou pensar", "preciso pensar", "deixa eu pensar", "vou ver", "deixa eu ver", "vou decidir", "vou falar com minha esposa", "vou falar com meu marido", "vou falar com a minha esposa", "vou falar com o meu marido", "vou consultar", "vou falar com a família", "retorno em breve", "depois te aviso", "vou dar um retorno", "vou retornar", "depois eu volto", "vou conversar com"];
+    if (frasesPensar.some(f => t.includes(f))) { motivo = "vai_pensar"; dias = 1; }
 
-    const frasesPensar = [
-      "vou pensar", "preciso pensar", "deixa eu pensar",
-      "vou ver", "deixa eu ver", "vou decidir",
-      "vou falar com minha esposa", "vou falar com meu marido",
-      "vou falar com a minha esposa", "vou falar com o meu marido",
-      "vou consultar", "vou falar com a família", "vou falar com minha familia",
-      "retorno em breve", "depois te aviso", "te aviso depois",
-      "vou dar um retorno", "vou retornar", "depois eu volto",
-      "vou conversar com", "deixa eu conversar"
-    ];
-    if (frasesPensar.some(f => t.includes(f))) { motivo = "vai_pensar"; diasAguardar = 1; }
+    const frasesCaro = ["tá caro", "está caro", "muito caro", "caro demais", "não tenho condição", "não tenho dinheiro", "sem condição", "tá pesado", "fora do meu orçamento", "acima do meu orçamento", "não cabe no bolso", "não tenho esse valor", "não consigo", "não tenho como"];
+    if (!motivo && frasesCaro.some(f => t.includes(f))) { motivo = "achou_caro"; dias = 3; }
 
-    const frasesCaro = [
-      "tá caro", "está caro", "muito caro", "caro demais",
-      "não tenho condição", "não tenho dinheiro", "sem condição",
-      "tá pesado", "está pesado", "pesado demais",
-      "fora do meu orçamento", "acima do meu orçamento",
-      "não cabe no bolso", "não tenho esse valor",
-      "não consigo", "não tenho como", "excede meu orçamento"
-    ];
-    if (!motivo && frasesCaro.some(f => t.includes(f))) { motivo = "achou_caro"; diasAguardar = 3; }
+    const frasesAvaliacao = ["avaliação baixa", "pouco pelo meu", "esperava mais", "vale mais", "não compensa", "achei pouco", "muito pouco"];
+    if (!motivo && frasesAvaliacao.some(f => t.includes(f))) { motivo = "avaliacao_baixa"; dias = 5; }
 
-    const frasesAvaliacao = [
-      "avaliação baixa", "avaliacao baixa", "pouco pelo meu",
-      "esperava mais", "vale mais", "não compensa",
-      "abaixo do esperado", "achei pouco", "muito pouco"
-    ];
-    if (!motivo && frasesAvaliacao.some(f => t.includes(f))) { motivo = "avaliacao_baixa"; diasAguardar = 5; }
-
-    const frasesSemInteresse = [
-      "não tenho interesse", "nao tenho interesse",
-      "desisti", "não quero mais", "nao quero mais",
-      "mudei de ideia", "cancelar", "esquece", "deixa pra lá"
-    ];
-    if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; diasAguardar = 7; }
+    const frasesSemInteresse = ["não tenho interesse", "desisti", "não quero mais", "mudei de ideia", "cancelar", "esquece", "deixa pra lá"];
+    if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; dias = 7; }
 
     if (!motivo) return;
-
-    const veiculoMatch = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
-    await agendarFollowUp(from, motivo, veiculoMatch ? veiculoMatch[0] : null, diasAguardar);
-  } catch (e) {
-    console.error("[FollowUp] Erro detectarLeadFrio:", e.message);
-  }
+    const vm = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
+    await agendarFollowUp(from, motivo, vm ? vm[0] : null, dias);
+  } catch (e) { console.error("[FollowUp] Erro detectarLeadFrio:", e.message); }
 }
 
 async function verificarClientesSumidos() {
   try {
     const agora = Date.now();
-    const vintequatroHoras = 24 * 60 * 60 * 1000;
-    for (const [telefone, ultimaMensagem] of Object.entries(ultimaMensagemCliente)) {
-      if (agora - ultimaMensagem > vintequatroHoras) {
+    for (const [telefone, ultima] of Object.entries(ultimaMensagemCliente)) {
+      if (agora - ultima > 24 * 60 * 60 * 1000) {
         const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
-        if (!data || data.length === 0) {
-          const historico = conversas[telefone] || [];
-          const veiculoMatch = historico.map(m => m.content || "").join(" ").toLowerCase()
-            .match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
-          await agendarFollowUp(telefone, "sumiu", veiculoMatch ? veiculoMatch[0] : null, 5);
+        if (!data || !data.length) {
+          const hist = (conversas[telefone] || []).map(m => m.content || "").join(" ").toLowerCase();
+          const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
+          await agendarFollowUp(telefone, "sumiu", vm ? vm[0] : null, 5);
+          await atualizarEstagio(telefone, "frio");
         }
         delete ultimaMensagemCliente[telefone];
       }
     }
-  } catch (e) {
-    console.error("[FollowUp] Erro verificarClientesSumidos:", e.message);
-  }
+  } catch (e) { console.error("[FollowUp] Erro verificarClientesSumidos:", e.message); }
 }
 
 setInterval(verificarClientesSumidos, 60 * 60 * 1000);
@@ -305,29 +312,24 @@ async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
     const prompts = {
-      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas em Porto Alegre. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta e calorosa de follow-up, sem pressionar. Máximo 3 linhas.`,
-      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Crie uma mensagem curta perguntando qual seria o valor de parcela ideal. Máximo 3 linhas.`,
-      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Um cliente ficou insatisfeito com a avaliação na troca. Reforce que a avaliação presencial pode surpreender. Máximo 3 linhas.`,
-      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Um cliente disse que não tinha interesse. Mensagem muito leve perguntando se posso ajudar. Máximo 2 linhas.`,
-      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Um cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar contato. Máximo 2 linhas.`
+      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta e calorosa, sem pressionar. Máximo 3 linhas.`,
+      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Pergunte qual parcela cabe no orçamento. Máximo 3 linhas.`,
+      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Cliente insatisfeito com avaliação na troca. Reforce que a avaliação presencial pode surpreender. Máximo 3 linhas.`,
+      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Cliente sem interesse. Mensagem muito leve perguntando se posso ajudar. Máximo 2 linhas.`,
+      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar. Máximo 2 linhas.`
     };
-    const res = await axios.post(
-      "https://api.anthropic.com/v1/messages",
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
       { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
-  } catch (e) {
-    console.error("[FollowUp] Erro gerarMensagem:", e.message);
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 async function processarFollowUpsPendentes() {
   try {
     const { data: followups } = await supabase.from("followups").select("*").eq("enviado", false).lte("agendado_para", new Date().toISOString());
-    if (!followups || followups.length === 0) return;
-    console.log(`[FollowUp] ${followups.length} follow-up(s) para enviar`);
+    if (!followups?.length) return;
     for (const followup of followups) {
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
@@ -340,15 +342,10 @@ async function processarFollowUpsPendentes() {
         await salvarMensagem(followup.telefone, "sara", mensagem);
         if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
         conversas[followup.telefone].push({ role: "assistant", content: mensagem });
-        console.log(`[FollowUp] ✅ Enviado para ${followup.telefone}`);
-        await notificarAugusto(followup.telefone, `[FollowUp automático]: ${mensagem}`, false);
-      } catch (e) {
-        console.error(`[FollowUp] Erro ao enviar:`, e.message);
-      }
+        await notificarAugusto(followup.telefone, `[FollowUp]: ${mensagem}`, false);
+      } catch (e) { console.error(`[FollowUp] Erro envio:`, e.message); }
     }
-  } catch (e) {
-    console.error("[FollowUp] Erro processarFollowUpsPendentes:", e.message);
-  }
+  } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
 
 setInterval(processarFollowUpsPendentes, 30 * 60 * 1000);
@@ -363,37 +360,27 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   const ultima = ultimaNotificacao[from] || 0;
   if (!primeiraVez && agora - ultima < 30 * 60 * 1000) return;
   ultimaNotificacao[from] = agora;
-
   const numero = from.replace(/\D/g, "");
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
-  const emoji = primeiraVez ? "🆕" : "📩";
-  const titulo = primeiraVez ? "Novo cliente na Sarah" : "Mensagem na Sarah";
-  const mensagem = `${emoji} *${titulo}*\nNúmero: ${formatado}\nMensagem: "${String(texto).substring(0, 100)}"\n\nAcesse o painel: https://agente-mensagens1.onrender.com/painel`;
-
+  const mensagem = `${primeiraVez ? "🆕 *Novo cliente*" : "📩 *Mensagem*"}\nNúmero: ${formatado}\n"${String(texto).substring(0, 100)}"\n\nhttps://agente-mensagens1.onrender.com/painel`;
   try {
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
-    console.log(`[Notificação] ✅ ${primeiraVez ? "Novo cliente" : "Atualização"} — ${formatado}`);
-  } catch (e) {
-    console.error(`[Notificação] ❌ Erro:`, e.message);
-  }
+  } catch (e) { console.error(`[Notificação] Erro:`, e.message); }
 }
 
 async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
   const numero = from.replace(/\D/g, "");
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
-  const mensagem = `🔍 *Cliente buscando carro não disponível*\n\nCliente: ${formatado}\nCarro de interesse: *${modeloBuscado}*\n${infoCliente ? `Detalhes: ${infoCliente}` : ""}\n\nConsidere buscar esse veículo!`;
+  const mensagem = `🔍 *Carro não disponível*\nCliente: ${formatado}\nProcura: *${modeloBuscado}*\n${infoCliente ? `Info: ${infoCliente}` : ""}`;
   try {
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
-    console.log(`[Notificação] ✅ Carro não disponível: ${modeloBuscado}`);
-  } catch (e) {
-    console.error(`[Notificação] Erro carro não disponível:`, e.message);
-  }
+  } catch (e) { console.error(`[Notificação] Erro carro:`, e.message); }
 }
 
 // ─────────────────────────────────────────────
@@ -411,11 +398,8 @@ async function buscarEstoqueInstagram() {
       const caption = limparTexto(post.caption || "");
       if (!caption.includes("R$")) continue;
       let fotos = [];
-      if (post.media_type === "CAROUSEL_ALBUM" && post.children) {
-        fotos = post.children.data.map(c => c.media_url).filter(Boolean);
-      } else if (post.media_url) {
-        fotos = [post.media_url];
-      }
+      if (post.media_type === "CAROUSEL_ALBUM" && post.children) fotos = post.children.data.map(c => c.media_url).filter(Boolean);
+      else if (post.media_url) fotos = [post.media_url];
       const precoMatch = caption.match(/R\$\s*([\d.,]+)/);
       const kmMatch = caption.match(/([\d.,]+)\s*km/i);
       const anoMatch = caption.match(/(\d{4})\/\d{4}|(\d{4})/);
@@ -426,16 +410,12 @@ async function buscarEstoqueInstagram() {
         ano: anoMatch ? (anoMatch[1] || anoMatch[2]) : "",
         km: kmMatch ? parseFloat(kmMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
         preco: precoMatch ? parseFloat(precoMatch[1].replace(/\./g, "").replace(",", ".")) : 0,
-        descricao: caption, fotos,
-        atualizadoEm: new Date().toISOString(),
+        descricao: caption, fotos, atualizadoEm: new Date().toISOString()
       });
     }
     console.log(`[Instagram] ✅ ${veiculos.length} veículos extraídos`);
     return veiculos;
-  } catch (e) {
-    console.error("[Instagram] Erro:", e.message);
-    return [];
-  }
+  } catch (e) { console.error("[Instagram] Erro:", e.message); return []; }
 }
 
 async function sincronizarEstoque() {
@@ -446,9 +426,7 @@ async function sincronizarEstoque() {
       ultimaAtualizacao = new Date().toLocaleString("pt-BR");
       console.log(`[Estoque] ✅ ${veiculos.length} veículos | ${ultimaAtualizacao}`);
     }
-  } catch (e) {
-    console.error("[Estoque] Erro:", e.message);
-  }
+  } catch (e) { console.error("[Estoque] Erro:", e.message); }
 }
 
 sincronizarEstoque();
@@ -468,19 +446,16 @@ async function getMarcasFipe() {
 async function extrairVeiculoParaTroca(textos) {
   try {
     const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-sonnet-4-5", max_tokens: 150, messages: [{ role: "user", content: `Analise esse texto e extraia o veículo que o cliente quer VENDER ou DAR NA TROCA.
+      { model: "claude-sonnet-4-5", max_tokens: 150, messages: [{ role: "user", content: `Extraia o veículo que o cliente quer VENDER ou DAR NA TROCA.
 Responda APENAS em JSON: {"marca": "...", "modelo": "...", "ano": "..."}
-Use nomes simples em minúsculo. Se não encontrar, coloque null.
-Exemplos: "tenho um gol 2012" → {"marca": "volkswagen", "modelo": "gol", "ano": "2012"}
+Use nomes simples. Se não encontrar, coloque null.
 Texto: "${textos.join(" ")}"` }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     const jsonMatch = res.data.content[0].text.trim().match(/\{[^}]+\}/);
     if (!jsonMatch) return { marca: null, modelo: null, ano: null };
     return JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    return { marca: null, modelo: null, ano: null };
-  }
+  } catch (e) { return { marca: null, modelo: null, ano: null }; }
 }
 
 async function consultarFipe(marca, modelo, ano) {
@@ -494,27 +469,23 @@ async function consultarFipe(marca, modelo, ano) {
     const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`);
     const candidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(modelo.toLowerCase().split(" ")[0]));
     if (!candidatos.length) return null;
-    for (const candidato of candidatos) {
-      const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos`);
+    for (const c of candidatos) {
+      const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${c.codigo}/anos`);
       const anoFipe = anosRes.data.find(a => a.nome.includes(ano.toString()) && !a.nome.includes("32000"));
       if (anoFipe) {
-        const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${candidato.codigo}/anos/${anoFipe.codigo}`);
+        const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${c.codigo}/anos/${anoFipe.codigo}`);
         fipeCache[chave] = valorRes.data;
         console.log(`✅ FIPE: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
         return valorRes.data;
       }
     }
     return null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function calcularValoresTroca(valorFipeStr) {
   const valor = parseFloat(valorFipeStr.replace("R$ ", "").replace(/\./g, "").replace(",", "."));
   return {
-    fipe: valor,
-    fipeFormatado: valor.toLocaleString("pt-BR"),
     minimoFormatado: Math.round(valor * 0.80).toLocaleString("pt-BR"),
     maximoFormatado: Math.round(valor * 0.85).toLocaleString("pt-BR")
   };
@@ -542,10 +513,9 @@ async function analisarImagem(mediaId, caption) {
     const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
     const imageRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
     const base64Image = Buffer.from(imageRes.data).toString("base64");
-    const mimeType = mediaRes.data.mime_type || "image/jpeg";
     const res = await axios.post("https://api.anthropic.com/v1/messages",
       { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: mimeType, data: base64Image } },
+        { type: "image", source: { type: "base64", media_type: mediaRes.data.mime_type || "image/jpeg", data: base64Image } },
         { type: "text", text: `Avaliador de veículos. Descreva em 2 linhas: estado geral, pontos positivos e de atenção. ${caption ? `Contexto: ${caption}` : ""}` }
       ]}] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
@@ -561,31 +531,23 @@ async function analisarImagem(mediaId, caption) {
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
-
   const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
   const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
   if (confirmacoesSimples.includes(t) && ultimaResposta.toLowerCase().includes("foto")) return true;
-
-  const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mando foto", "mandando foto", "vou enviar", "to mandando", "tô mandando", "estou mandando", "to enviando"];
+  const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mandando foto", "vou enviar", "to mandando", "tô mandando"];
   if (naoEPedido.some(p => t.includes(p))) return false;
-
-  const ePedido = ["tem foto", "tem fotos", "manda foto", "manda as foto", "pode mandar foto", "me manda foto", "me passa foto", "quero ver foto", "quero ver as foto", "tem imagem", "me mostra", "posso ver", "ver o interior", "ver o exterior", "ver por dentro", "ver por fora", "foto dele", "fotos dele", "vai mandar as fotos", "vai mandar foto", "as fotos"];
-  if (ePedido.some(p => t.includes(p))) return true;
-
-  return false;
+  const ePedido = ["tem foto", "tem fotos", "manda foto", "manda as foto", "pode mandar foto", "me manda foto", "me passa foto", "quero ver foto", "quero ver as foto", "me mostra", "posso ver", "foto dele", "fotos dele", "vai mandar as fotos", "as fotos"];
+  return ePedido.some(p => t.includes(p));
 }
 
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
-  const contextoCompleto = [texto, ...(historicoConversa || []).filter(m => m.role === "user").slice(-8).map(m => m.content)].join(" ").toLowerCase() + " " + ultimaResposta.toLowerCase();
-
-  let melhorMatch = null;
-  let melhorScore = 0;
+  const ctx = [texto, ...(historicoConversa || []).filter(m => m.role === "user").slice(-8).map(m => m.content)].join(" ").toLowerCase() + " " + ultimaResposta.toLowerCase();
+  let melhorMatch = null, melhorScore = 0;
   for (const v of estoque) {
     const modelo = limparTexto(v.modelo || "").toLowerCase();
-    const palavras = modelo.split(/\s+/).filter(p => p.length > 2);
-    let score = palavras.filter(p => contextoCompleto.includes(p)).length;
-    if (v.ano && contextoCompleto.includes(String(v.ano))) score += 2;
+    let score = modelo.split(/\s+/).filter(p => p.length > 2 && ctx.includes(p)).length;
+    if (v.ano && ctx.includes(String(v.ano))) score += 2;
     if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
   }
   return melhorScore >= 1 ? melhorMatch : null;
@@ -606,18 +568,11 @@ async function enviarFotosVeiculo(to, veiculo) {
   return true;
 }
 
-// ─────────────────────────────────────────────
-// DETECTA MODELO BUSCADO
-// ─────────────────────────────────────────────
-
 async function extrairModeloBuscado(textos) {
   try {
     const res = await axios.post("https://api.anthropic.com/v1/messages",
       { model: "claude-sonnet-4-5", max_tokens: 100, messages: [{ role: "user", content: `Extraia o modelo de carro que o cliente quer COMPRAR.
-Responda APENAS em JSON: {"modelo": "...", "ano": "..."}
-Se não encontrar, coloque null.
-Exemplos: "quero uma renegade 2020" → {"modelo": "renegade", "ano": "2020"}
-"tenho um gol pra vender" → {"modelo": null, "ano": null}
+JSON: {"modelo": "...", "ano": "..."} ou null se não encontrar.
 Texto: "${textos.join(" ")}"` }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
@@ -639,67 +594,36 @@ function formatarEstoque() {
 
 const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
-EMPRESA:
-- Endereço: Av. Aparício Borges, 931 - Porto Alegre/RS
-- Horário: Seg-Sex 8h-18h, Sáb 8h-12h
-- Consultor humano: (51) 99364-2476
+EMPRESA: Av. Aparício Borges, 931 - Porto Alegre/RS | Seg-Sex 8h-18h, Sáb 8h-12h | Consultor: (51) 99364-2476
 
-PERFIL:
-- Simpática, descontraída e profissional
-- Respostas CURTAS e DIRETAS — máximo 4 linhas
-- NUNCA repita a saudação depois da primeira mensagem
-- SEMPRE mantenha o contexto da conversa anterior
+PERFIL: Simpática, descontraída e profissional. Respostas CURTAS — máximo 4 linhas. NUNCA repita a saudação.
 
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
 
-REGRAS DE PREÇO:
-- Use EXATAMENTE os preços do estoque acima
-- NUNCA altere, arredonde ou invente preços
+REGRAS DE PREÇO: Use EXATAMENTE os preços do estoque. NUNCA invente ou altere preços.
 
-QUANDO CLIENTE PEDE CARRO QUE NÃO ESTÁ NO ESTOQUE:
-${carroNaoDisponivel ?
-    `⚠️ Cliente procura: ${carroNaoDisponivel} — NÃO disponível no momento.
-NUNCA diga apenas "não temos". Siga este fluxo:
-1. Informe que esse modelo não está disponível no momento
-2. Pergunte detalhes para avisar quando chegar ou encontrar similar:
-   - "Que ano você está procurando?"
-   - "Qual sua faixa de preço ou valor de parcela?"
-   - "Tem carro para dar na troca?"
+${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
+1. Informe que não está disponível no momento
+2. Pergunte: ano procurado, faixa de preço/parcela, tem troca?
 3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
-4. Só ofereça alternativas do estoque se tiver algo REALMENTE similar` :
-    `Se cliente pedir carro não disponível: qualifique (ano, orçamento, troca) antes de oferecer alternativas. Ofereça avisar quando chegar.`}
+4. Só ofereça alternativas se tiver algo REALMENTE similar` : ""}
 
-FOTOS DOS VEÍCULOS:
-- Quando sistema confirmar envio, diga: "Mandei as fotos pra você! O que achou? 😊"
-- NUNCA diga que enviou sem confirmação do sistema
-- NUNCA use tags XML
+FOTOS: Quando sistema confirmar envio, diga: "Mandei as fotos! O que achou? 😊". NUNCA use tags XML.
 
-PAGAMENTO: Financiamento (BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú), Cartão, Consórcio, À vista
+PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórcio, À vista
 
-FLUXO DE AVALIAÇÃO DE TROCA:
-ETAPA 1 — Conhecer o carro: km, estado geral, revisões, fotos 📸
-ETAPA 2 — Fotos recebidas: agradeça e comente positivamente
-ETAPA 3 — Só após ter km, estado e fotos:
-${fipeInfo ? (() => {
-    const v = calcularValoresTroca(fipeInfo.Valor);
-    return `✅ FIPE: ${fipeInfo.Modelo} ${fipeInfo.AnoModelo} = ${fipeInfo.Valor}
-Faixa: R$ ${v.minimoFormatado} a R$ ${v.maximoFormatado}
-Diga: "Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!"
-NÃO mencione FIPE, percentuais ou descontos.`;
-  })() : `⚠️ FIPE não consultada — NUNCA invente valores.`}
+AVALIAÇÃO DE TROCA:
+Etapa 1: km, estado geral, revisões, fotos 📸
+Etapa 2: Agradeça as fotos
+Etapa 3 (só após tudo): ${fipeInfo ? (() => { const v = calcularValoresTroca(fipeInfo.Valor); return `"Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!" NÃO mencione FIPE.`; })() : "NUNCA invente valores."}
 
-QUANDO CLIENTE ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
+QUANDO ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
 QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
 
-SIMULAÇÃO: Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1). Só simule se cliente pedir.
-TROCO: Banco financia até FIPE. Valor financiado = preço + troco - saldo troca.
+FINANCIAMENTO: Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1). Só simule se cliente pedir.
 
-REGRAS:
-- Primeira mensagem: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
-- Máximo 4 linhas, emojis com moderação 🚗
-- Humano: (51) 99364-2476
-- NUNCA invente links, informações ou use tags XML${aprendizadosExtra}`;
+REGRAS: Primeira msg: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!" | Máximo 4 linhas | NUNCA invente links ou use XML${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
 // PROCESSAMENTO
@@ -713,34 +637,28 @@ async function processarMensagem(from, text) {
   if (!conversas[from]) conversas[from] = [];
   conversas[from].push({ role: "user", content: text });
 
-  // Salva no Supabase
   await salvarMensagem(from, "client", text);
   notificarAugusto(from, text, primeiraVez).catch(() => {});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
+  detectarEstagio(from, text, conversas[from]).catch(() => {});
 
   // Detecta carro não disponível
   let carroNaoDisponivel = null;
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
   const modeloBuscado = await extrairModeloBuscado(todosTextos);
-
   if (modeloBuscado) {
     const modeloNome = modeloBuscado.modelo.toLowerCase();
-    const anoNome = modeloBuscado.ano;
-    const encontrado = estoqueAtual.some(v => {
-      const modeloEstoque = limparTexto(v.modelo || "").toLowerCase();
-      const anoOk = !anoNome || String(v.ano) === String(anoNome);
-      return modeloEstoque.includes(modeloNome) && anoOk;
-    });
-
+    const encontrado = estoqueAtual.some(v => limparTexto(v.modelo || "").toLowerCase().includes(modeloNome));
     if (!encontrado) {
-      const descricao = `${modeloBuscado.modelo}${anoNome ? ` ${anoNome}` : ""}`;
+      const descricao = `${modeloBuscado.modelo}${modeloBuscado.ano ? ` ${modeloBuscado.ano}` : ""}`;
       carroNaoDisponivel = descricao;
       const jaNotificou = conversas[from].some(m => m.content?.includes("[Sistema: cliente buscou"));
       if (!jaNotificou) {
         notificarCarroNaoDisponivel(from, descricao, todosTextos.slice(-3).join(" | ")).catch(() => {});
         conversas[from].push({ role: "user", content: `[Sistema: cliente buscou ${descricao} que não está no estoque. Augusto foi notificado. Qualifique o cliente.]` });
+        atualizarEstagio(from, "quente", descricao).catch(() => {});
       }
     }
   }
@@ -748,13 +666,13 @@ async function processarMensagem(from, text) {
   // Fotos do estoque
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
-
   if (ehTextoNormal && !jaEnviouFotos && clienteEstaPedindoFotosDoEstoque(text, conversas[from])) {
     const veiculo = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-    if (veiculo && veiculo.fotos?.length > 0) {
+    if (veiculo?.fotos?.length > 0) {
       console.log(`[Fotos] Enviando ${veiculo.fotos.length} fotos do ${veiculo.modelo}`);
       await enviarFotosVeiculo(from, veiculo);
-      conversas[from].push({ role: "user", content: `[Sistema: fotos enviadas automaticamente do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que o cliente achou.]` });
+      conversas[from].push({ role: "user", content: `[Sistema: fotos enviadas do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que achou.]` });
+      atualizarEstagio(from, "negociacao", limparTexto(veiculo.modelo)).catch(() => {});
     }
   }
 
@@ -780,10 +698,10 @@ async function processarMensagem(from, text) {
 }
 
 async function processarFotosAgrupadas(from, analises) {
-  const textoAgrupado = analises.length === 1
-    ? `[Cliente enviou foto do veículo. Análise: ${analises[0]}]`
+  const texto = analises.length === 1
+    ? `[Cliente enviou foto. Análise: ${analises[0]}]`
     : `[Cliente enviou ${analises.length} fotos. Análises:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
-  await processarMensagem(from, textoAgrupado);
+  await processarMensagem(from, texto);
 }
 
 // ─────────────────────────────────────────────
@@ -796,25 +714,24 @@ app.get("/sincronizar", async (req, res) => { res.send("Iniciado!"); await sincr
 
 app.get("/testar-supabase", async (req, res) => {
   try {
-    const { data, error } = await supabase.from("mensagens").select("count").limit(1);
-    if (error) return res.json({ ok: false, erro: error.message, detalhe: JSON.stringify(error) });
-    const { data: total } = await supabase.from("mensagens").select("*", { count: "exact", head: true });
-    res.json({ ok: true, mensagem: "Supabase conectado!", total: total });
-  } catch (e) {
-    res.json({ ok: false, erro: e.message });
-  }
+    const { error } = await supabase.from("mensagens").select("count").limit(1);
+    if (error) return res.json({ ok: false, erro: error.message });
+    res.json({ ok: true, mensagem: "Supabase conectado!" });
+  } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
 
-app.get("/testar-notificacao", async (req, res) => {
+app.get("/crm", async (req, res) => {
+  try { res.json(await buscarLeadsCRM()); }
+  catch (e) { res.json({}); }
+});
+
+app.post("/crm/mover", async (req, res) => {
+  const { telefone, estagio } = req.body;
+  if (!telefone || !estagio) return res.status(400).json({ erro: "Dados inválidos" });
   try {
-    const resultado = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: "✅ Teste de notificação da Sarah funcionando!" } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
-    res.json({ ok: true, numero: NUMERO_AUGUSTO, resultado: resultado.data });
-  } catch (e) {
-    res.json({ ok: false, erro: e.message, detalhe: e.response?.data });
-  }
+    await atualizarEstagio(telefone, estagio);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 app.get("/followups", async (req, res) => {
@@ -832,39 +749,28 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   res.sendStatus(200);
-
   if (body.object === "whatsapp_business_account") {
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
-
     const msgId = msg.id;
     if (mensagensProcessadas.has(msgId)) return;
     mensagensProcessadas.add(msgId);
     setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
-
     const from = msg.from;
-
     try {
       if (msg.type === "text") {
         const text = msg.text?.body;
         if (!text) return;
         console.log(`Texto de ${from}: ${text}`);
         await processarMensagem(from, text);
-
       } else if (msg.type === "audio") {
         const texto = await transcreverAudio(msg.audio.id);
-        if (texto) {
-          console.log(`Áudio transcrito de ${from}: ${texto}`);
-          await processarMensagem(from, `[Áudio]: ${texto}`);
-        } else {
-          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-            { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
-            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-          );
-        }
-
+        if (texto) await processarMensagem(from, `[Áudio]: ${texto}`);
+        else await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
       } else if (msg.type === "image") {
-        console.log(`Imagem recebida de ${from}`);
         const caption = msg.image?.caption || "";
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
@@ -896,17 +802,8 @@ app.get("/registrar", async (req, res) => {
   } catch (e) { res.send("Erro: " + JSON.stringify(e.response?.data)); }
 });
 
-app.get("/assinar-webhook", async (req, res) => {
-  try {
-    const result = await axios.post(`https://graph.facebook.com/v18.0/2609687206092266/subscribed_apps`, {},
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-    res.send("Assinado! " + JSON.stringify(result.data));
-  } catch (e) { res.send("Erro: " + JSON.stringify(e.response?.data)); }
-});
-
 // ─────────────────────────────────────────────
-// PAINEL
+// PAINEL CRM
 // ─────────────────────────────────────────────
 
 app.get("/painel", (req, res) => {
@@ -915,124 +812,240 @@ app.get("/painel", (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sarah - Painel Premium Automarcas</title>
+<title>Sarah CRM — Premium Automarcas</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
-  header { background: #1a1a1a; border-bottom: 1px solid #333; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
-  header h1 { font-size: 18px; color: #fff; } header h1 span { color: #f0a500; }
-  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #888; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-  .main { display: flex; flex: 1; overflow: hidden; }
-  .sidebar { width: 280px; background: #161616; border-right: 1px solid #2a2a2a; display: flex; flex-direction: column; }
-  .sidebar-header { padding: 12px 16px; font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #2a2a2a; }
-  .conv-list { flex: 1; overflow-y: auto; }
-  .conv-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #1f1f1f; transition: background 0.15s; }
-  .conv-item:hover { background: #1e1e1e; }
-  .conv-item.active { background: #1e2a1e; border-left: 3px solid #f0a500; }
-  .conv-item.unread { border-left: 3px solid #f44336; }
-  .conv-phone { font-size: 13px; font-weight: 600; color: #fff; }
-  .conv-preview { font-size: 12px; color: #666; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .conv-time { font-size: 11px; color: #555; margin-top: 2px; }
-  .conv-badge { display: inline-block; background: #f44336; color: #fff; font-size: 10px; padding: 1px 5px; border-radius: 10px; margin-left: 4px; }
-  .chat-area { flex: 1; display: flex; flex-direction: column; }
-  .chat-header { padding: 12px 20px; background: #1a1a1a; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; justify-content: space-between; }
-  .chat-phone { font-size: 15px; font-weight: 600; }
-  .chat-actions { display: flex; gap: 8px; }
-  .btn { padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
-  .btn:hover { opacity: 0.85; }
-  .btn-primary { background: #f0a500; color: #000; } .btn-danger { background: #f44336; color: #fff; }
-  .btn-secondary { background: #333; color: #fff; } .btn-followup { background: #1565c0; color: #fff; }
-  .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-  .msg { max-width: 75%; }
-  .msg.client { align-self: flex-start; } .msg.sara, .msg.intervencao { align-self: flex-end; }
-  .msg-bubble { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
-  .msg.client .msg-bubble { background: #2a2a2a; color: #e0e0e0; border-bottom-left-radius: 3px; }
-  .msg.sara .msg-bubble { background: #1a3a1a; color: #b8e6b8; border-bottom-right-radius: 3px; }
-  .msg.intervencao .msg-bubble { background: #2a1a00; color: #f0c060; border-bottom-right-radius: 3px; border: 1px solid #f0a500; }
-  .msg-meta { font-size: 11px; color: #555; margin-top: 3px; }
-  .msg.sara .msg-meta, .msg.intervencao .msg-meta { text-align: right; }
-  .msg-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-  .msg.client .msg-label { color: #666; } .msg.sara .msg-label { color: #4a8; text-align: right; } .msg.intervencao .msg-label { color: #f0a500; text-align: right; }
-  .intervention { background: #1a1a1a; border-top: 1px solid #2a2a2a; padding: 12px 16px; }
-  .intervention-header { font-size: 11px; color: #f0a500; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-  .intervention-input { display: flex; gap: 8px; }
-  .intervention-input textarea { flex: 1; background: #252525; border: 1px solid #333; border-radius: 8px; color: #fff; padding: 10px 12px; font-size: 14px; resize: none; height: 60px; font-family: inherit; }
-  .intervention-input textarea:focus { outline: none; border-color: #f0a500; }
-  .learning-panel { width: 260px; background: #161616; border-left: 1px solid #2a2a2a; display: flex; flex-direction: column; }
-  .tabs { display: flex; border-bottom: 1px solid #2a2a2a; }
-  .tab { flex: 1; padding: 8px 4px; font-size: 11px; color: #666; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; text-align: center; }
-  .tab.active { color: #f0a500; border-bottom: 2px solid #f0a500; }
-  .learning-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .learning-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #f0a500; }
-  .learning-item .situation { color: #888; margin-bottom: 4px; } .learning-item .correction { color: #b8e6b8; }
-  .followup-item { background: #1e1e1e; border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 12px; border-left: 3px solid #1565c0; }
-  .followup-item .fu-phone { color: #64b5f6; font-weight: 600; } .followup-item .fu-motivo { color: #888; margin-top: 2px; } .followup-item .fu-data { color: #555; margin-top: 2px; font-size: 11px; }
-  .learning-count { padding: 8px 16px; font-size: 12px; color: #555; border-top: 1px solid #2a2a2a; }
-  .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: #444; }
-  .loading { text-align: center; padding: 20px; color: #555; font-size: 13px; }
-  .aba-content { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#0a0a0a; color:#e0e0e0; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+header { background:#111; border-bottom:1px solid #222; padding:10px 20px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+header h1 { font-size:16px; color:#fff; font-weight:700; }
+header h1 span { color:#f0a500; }
+.header-right { display:flex; align-items:center; gap:16px; }
+.status { display:flex; align-items:center; gap:6px; font-size:12px; color:#888; }
+.dot { width:7px; height:7px; border-radius:50%; background:#4caf50; animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.nav-tabs { display:flex; gap:4px; }
+.nav-tab { padding:5px 14px; border-radius:6px; font-size:12px; cursor:pointer; color:#888; border:1px solid transparent; transition:all 0.15s; }
+.nav-tab:hover { color:#fff; }
+.nav-tab.active { background:#1e1e1e; color:#f0a500; border-color:#333; }
+
+/* ── VIEWS ── */
+.view { display:none; flex:1; overflow:hidden; }
+.view.active { display:flex; }
+
+/* ── CRM KANBAN ── */
+.kanban { display:flex; gap:12px; padding:16px; overflow-x:auto; flex:1; }
+.kanban::-webkit-scrollbar { height:6px; }
+.kanban::-webkit-scrollbar-track { background:#111; }
+.kanban::-webkit-scrollbar-thumb { background:#333; border-radius:3px; }
+
+.coluna { min-width:240px; max-width:240px; background:#111; border-radius:10px; display:flex; flex-direction:column; border:1px solid #1e1e1e; }
+.coluna-header { padding:12px 14px 8px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #1a1a1a; }
+.coluna-titulo { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
+.coluna-count { font-size:11px; background:#1e1e1e; padding:2px 8px; border-radius:10px; color:#888; }
+
+.coluna-quente .coluna-titulo { color:#ff6b35; }
+.coluna-quente { border-top:2px solid #ff6b35; }
+.coluna-negociacao .coluna-titulo { color:#f0a500; }
+.coluna-negociacao { border-top:2px solid #f0a500; }
+.coluna-aguardando .coluna-titulo { color:#64b5f6; }
+.coluna-aguardando { border-top:2px solid #64b5f6; }
+.coluna-visita .coluna-titulo { color:#81c784; }
+.coluna-visita { border-top:2px solid #81c784; }
+.coluna-frio .coluna-titulo { color:#90a4ae; }
+.coluna-frio { border-top:2px solid #90a4ae; }
+.coluna-fechado .coluna-titulo { color:#ce93d8; }
+.coluna-fechado { border-top:2px solid #ce93d8; }
+
+.coluna-cards { flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }
+.coluna-cards::-webkit-scrollbar { width:4px; }
+.coluna-cards::-webkit-scrollbar-thumb { background:#222; border-radius:2px; }
+
+.card { background:#161616; border-radius:8px; padding:10px 12px; border:1px solid #1e1e1e; cursor:pointer; transition:all 0.15s; }
+.card:hover { background:#1a1a1a; border-color:#333; transform:translateY(-1px); }
+.card.selecionado { border-color:#f0a500; background:#1a1a14; }
+.card-phone { font-size:13px; font-weight:600; color:#fff; margin-bottom:4px; }
+.card-veiculo { font-size:11px; color:#f0a500; margin-bottom:4px; }
+.card-preview { font-size:11px; color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:6px; }
+.card-footer { display:flex; align-items:center; justify-content:space-between; }
+.card-tempo { font-size:10px; color:#444; }
+.card-badge { font-size:10px; background:#f44336; color:#fff; padding:1px 5px; border-radius:8px; }
+.card-acoes { display:flex; gap:4px; margin-top:8px; }
+.card-btn { font-size:10px; padding:3px 8px; border-radius:4px; border:none; cursor:pointer; font-weight:500; }
+.card-btn-chat { background:#1e2a1e; color:#81c784; }
+.card-btn-followup { background:#1a1e2a; color:#64b5f6; }
+.card-btn-mover { background:#1e1e1e; color:#888; }
+
+/* ── CHAT VIEW ── */
+.chat-view { flex:1; display:flex; overflow:hidden; }
+.chat-sidebar { width:280px; background:#111; border-right:1px solid #1e1e1e; display:flex; flex-direction:column; }
+.chat-sidebar-header { padding:12px 16px; font-size:11px; color:#666; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid #1a1a1a; }
+.conv-list { flex:1; overflow-y:auto; }
+.conv-item { padding:10px 14px; cursor:pointer; border-bottom:1px solid #141414; transition:background 0.15s; }
+.conv-item:hover { background:#161616; }
+.conv-item.active { background:#1a2a1a; border-left:3px solid #f0a500; }
+.conv-item.unread { border-left:3px solid #f44336; }
+.conv-phone { font-size:12px; font-weight:600; color:#fff; }
+.conv-preview { font-size:11px; color:#555; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.conv-time { font-size:10px; color:#444; margin-top:2px; }
+.conv-badge { display:inline-block; background:#f44336; color:#fff; font-size:9px; padding:1px 5px; border-radius:8px; margin-left:4px; }
+
+.chat-main { flex:1; display:flex; flex-direction:column; }
+.chat-header { padding:10px 18px; background:#111; border-bottom:1px solid #1e1e1e; display:flex; align-items:center; justify-content:space-between; }
+.chat-phone { font-size:14px; font-weight:600; }
+.chat-actions { display:flex; gap:6px; }
+.btn { padding:5px 12px; border-radius:6px; border:none; cursor:pointer; font-size:12px; font-weight:500; transition:opacity 0.15s; }
+.btn:hover { opacity:0.85; }
+.btn-primary { background:#f0a500; color:#000; }
+.btn-danger { background:#f44336; color:#fff; }
+.btn-secondary { background:#222; color:#fff; }
+.btn-blue { background:#1565c0; color:#fff; }
+.btn-green { background:#2e7d32; color:#fff; }
+
+.messages { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px; }
+.msg { max-width:75%; }
+.msg.client { align-self:flex-start; }
+.msg.sara, .msg.intervencao { align-self:flex-end; }
+.msg-bubble { padding:9px 13px; border-radius:10px; font-size:13px; line-height:1.5; }
+.msg.client .msg-bubble { background:#1e1e1e; color:#ddd; border-bottom-left-radius:3px; }
+.msg.sara .msg-bubble { background:#1a3a1a; color:#b8e6b8; border-bottom-right-radius:3px; }
+.msg.intervencao .msg-bubble { background:#2a1a00; color:#f0c060; border-bottom-right-radius:3px; border:1px solid #f0a500; }
+.msg-meta { font-size:10px; color:#444; margin-top:2px; }
+.msg.sara .msg-meta, .msg.intervencao .msg-meta { text-align:right; }
+.msg-label { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; color:#555; }
+.msg.sara .msg-label { color:#3a7; text-align:right; }
+.msg.intervencao .msg-label { color:#f0a500; text-align:right; }
+
+.intervention { background:#111; border-top:1px solid #1e1e1e; padding:10px 14px; }
+.intervention-header { font-size:10px; color:#f0a500; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
+.intervention-input { display:flex; gap:8px; }
+.intervention-input textarea { flex:1; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:7px; color:#fff; padding:8px 11px; font-size:13px; resize:none; height:52px; font-family:inherit; }
+.intervention-input textarea:focus { outline:none; border-color:#f0a500; }
+
+/* ── MODAL MOVER ── */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:center; justify-content:center; }
+.modal-overlay.open { display:flex; }
+.modal { background:#161616; border:1px solid #2a2a2a; border-radius:12px; padding:20px; min-width:300px; }
+.modal h3 { font-size:14px; color:#fff; margin-bottom:14px; }
+.modal-opcoes { display:flex; flex-direction:column; gap:8px; }
+.modal-opcao { padding:10px 14px; border-radius:8px; border:1px solid #2a2a2a; cursor:pointer; font-size:13px; transition:all 0.15s; }
+.modal-opcao:hover { border-color:#f0a500; background:#1a1a14; }
+.modal-cancel { margin-top:12px; width:100%; padding:8px; background:#1e1e1e; border:none; border-radius:7px; color:#888; cursor:pointer; font-size:12px; }
+
+.estagio-tag { display:inline-block; font-size:10px; padding:2px 8px; border-radius:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; }
+.tag-quente { background:#3a1a0a; color:#ff6b35; }
+.tag-negociacao { background:#3a2a00; color:#f0a500; }
+.tag-aguardando { background:#0a1a2a; color:#64b5f6; }
+.tag-visita_agendada { background:#0a2a0a; color:#81c784; }
+.tag-frio { background:#1a1e22; color:#90a4ae; }
+.tag-fechado { background:#1a0a2a; color:#ce93d8; }
+
+.empty-state { flex:1; display:flex; align-items:center; justify-content:center; color:#333; font-size:13px; }
+.loading-txt { text-align:center; padding:20px; color:#444; font-size:12px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Sarah <span>Premium Automarcas</span></h1>
-  <div class="status"><div class="dot"></div><span id="statusText">Conectando...</span></div>
+  <h1>Sarah <span>CRM</span> — Premium Automarcas</h1>
+  <div class="header-right">
+    <div class="nav-tabs">
+      <div class="nav-tab active" onclick="mostrarView('kanban')">📋 Pipeline</div>
+      <div class="nav-tab" onclick="mostrarView('chat')">💬 Conversas</div>
+    </div>
+    <div class="status"><div class="dot"></div><span id="statusText">Conectando...</span></div>
+  </div>
 </header>
-<div class="main">
-  <div class="sidebar">
-    <div class="sidebar-header">Conversas Ativas</div>
-    <div class="conv-list" id="convList"><div class="loading">Carregando...</div></div>
+
+<!-- KANBAN VIEW -->
+<div class="view active" id="view-kanban">
+  <div class="kanban" id="kanbanBoard">
+    <div class="loading-txt">Carregando pipeline...</div>
   </div>
-  <div class="chat-area">
-    <div class="chat-header">
-      <div class="chat-phone" id="chatPhone">Selecione uma conversa</div>
-      <div class="chat-actions" id="chatActions" style="display:none">
-        <button class="btn btn-followup" onclick="agendarFollowUpManual()">⏰ Follow-up</button>
-        <button class="btn btn-secondary" onclick="marcarResolvido()">✓ Resolvido</button>
-        <button class="btn btn-danger" onclick="salvarAprendizado()">💡 Aprendizado</button>
+</div>
+
+<!-- CHAT VIEW -->
+<div class="view" id="view-chat">
+  <div class="chat-view">
+    <div class="chat-sidebar">
+      <div class="chat-sidebar-header">Conversas</div>
+      <div class="conv-list" id="convList"><div class="loading-txt">Carregando...</div></div>
+    </div>
+    <div class="chat-main">
+      <div class="chat-header">
+        <div>
+          <div class="chat-phone" id="chatPhone">Selecione uma conversa</div>
+          <div id="chatEstagio" style="margin-top:3px"></div>
+        </div>
+        <div class="chat-actions" id="chatActions" style="display:none">
+          <button class="btn btn-blue" onclick="abrirModalMover()">↕ Mover</button>
+          <button class="btn btn-blue" onclick="agendarFollowUpManual()">⏰ Follow-up</button>
+          <button class="btn btn-secondary" onclick="marcarResolvido()">✓ Resolver</button>
+          <button class="btn btn-danger" onclick="abrirAprendizado()">💡 Aprender</button>
+        </div>
       </div>
-    </div>
-    <div class="messages" id="messages"><div class="empty-state"><span>Selecione uma conversa</span></div></div>
-    <div class="intervention" id="interventionArea" style="display:none">
-      <div class="intervention-header">⚡ Intervenção — enviado como Sarah</div>
-      <div class="intervention-input">
-        <textarea id="interventionText" placeholder="Digite e pressione Enter para enviar como Sarah..."></textarea>
-        <button class="btn btn-primary" onclick="enviarIntervencao()">Enviar</button>
+      <div class="messages" id="messages"><div class="empty-state">Selecione uma conversa</div></div>
+      <div class="intervention" id="interventionArea" style="display:none">
+        <div class="intervention-header">⚡ Intervenção — enviado como Sarah</div>
+        <div class="intervention-input">
+          <textarea id="interventionText" placeholder="Digite e Enter para enviar como Sarah..."></textarea>
+          <button class="btn btn-primary" onclick="enviarIntervencao()">Enviar</button>
+        </div>
       </div>
-    </div>
-  </div>
-  <div class="learning-panel">
-    <div class="tabs">
-      <div class="tab active" id="tab-aprendizados" onclick="mostrarAba('aprendizados')">💡 Aprend.</div>
-      <div class="tab" id="tab-followups" onclick="mostrarAba('followups')">⏰ Follow-ups</div>
-    </div>
-    <div class="aba-content" id="abaAprendizados">
-      <div class="learning-list" id="learningList"><div class="loading">Carregando...</div></div>
-      <div class="learning-count" id="learningCount"></div>
-    </div>
-    <div class="aba-content" id="abaFollowups" style="display:none">
-      <div class="learning-list" id="followupList"><div class="loading">Carregando...</div></div>
-      <div class="learning-count" id="followupCount"></div>
     </div>
   </div>
 </div>
+
+<!-- MODAL MOVER -->
+<div class="modal-overlay" id="modalMover">
+  <div class="modal">
+    <h3>Mover lead para...</h3>
+    <div class="modal-opcoes">
+      <div class="modal-opcao" onclick="moverLead('quente')">🔥 Quente — cliente engajado</div>
+      <div class="modal-opcao" onclick="moverLead('negociacao')">💬 Em negociação</div>
+      <div class="modal-opcao" onclick="moverLead('aguardando')">⏳ Aguardando resposta</div>
+      <div class="modal-opcao" onclick="moverLead('visita_agendada')">📅 Visita agendada</div>
+      <div class="modal-opcao" onclick="moverLead('frio')">❄️ Lead frio</div>
+      <div class="modal-opcao" onclick="moverLead('fechado')">✅ Fechado!</div>
+    </div>
+    <button class="modal-cancel" onclick="fecharModal()">Cancelar</button>
+  </div>
+</div>
+
 <script>
 const API = window.location.origin;
 let conversaAtiva = null;
+let viewAtiva = 'kanban';
 
-function mostrarAba(aba) {
-  document.getElementById('tab-aprendizados').classList.toggle('active', aba === 'aprendizados');
-  document.getElementById('tab-followups').classList.toggle('active', aba === 'followups');
-  document.getElementById('abaAprendizados').style.display = aba === 'aprendizados' ? 'flex' : 'none';
-  document.getElementById('abaFollowups').style.display = aba === 'followups' ? 'flex' : 'none';
-  if (aba === 'followups') carregarFollowups();
+const ESTAGIOS = {
+  quente: { label: '🔥 Quente', classe: 'tag-quente' },
+  negociacao: { label: '💬 Negociação', classe: 'tag-negociacao' },
+  aguardando: { label: '⏳ Aguardando', classe: 'tag-aguardando' },
+  visita_agendada: { label: '📅 Visita agendada', classe: 'tag-visita_agendada' },
+  frio: { label: '❄️ Frio', classe: 'tag-frio' },
+  fechado: { label: '✅ Fechado', classe: 'tag-fechado' }
+};
+
+const COLUNAS = [
+  { id: 'quente', titulo: '🔥 Quente', classe: 'coluna-quente' },
+  { id: 'negociacao', titulo: '💬 Negociação', classe: 'coluna-negociacao' },
+  { id: 'aguardando', titulo: '⏳ Aguardando', classe: 'coluna-aguardando' },
+  { id: 'visita_agendada', titulo: '📅 Visita agendada', classe: 'coluna-visita' },
+  { id: 'frio', titulo: '❄️ Frio', classe: 'coluna-frio' },
+  { id: 'fechado', titulo: '✅ Fechado', classe: 'coluna-fechado' }
+];
+
+function mostrarView(view) {
+  viewAtiva = view;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-' + view).classList.add('active');
+  event.target.classList.add('active');
+  if (view === 'kanban') carregarKanban();
+  if (view === 'chat') carregarConversas();
 }
 
 function formatarTelefone(num) {
   const n = String(num).replace(/\\D/g, '');
-  if (n.length >= 12) return '+' + n.slice(0,2) + ' (' + n.slice(2,4) + ') ' + n.slice(4,9) + '-' + n.slice(9);
+  if (n.length >= 12) return '(' + n.slice(2,4) + ') ' + n.slice(4,9) + '-' + n.slice(9);
   return num;
 }
 
@@ -1041,9 +1054,77 @@ function formatarHora(iso) {
   return new Date(iso).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
 }
 
-function formatarData(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('pt-BR', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+async function carregarKanban() {
+  try {
+    const res = await fetch(API + '/crm');
+    const data = await res.json();
+    const board = document.getElementById('kanbanBoard');
+    let total = 0;
+    Object.values(data).forEach(c => total += c.length);
+    document.getElementById('statusText').textContent = total + ' lead(s) no pipeline';
+
+    board.innerHTML = COLUNAS.map(col => {
+      const cards = data[col.id] || [];
+      return \`<div class="coluna \${col.classe}">
+        <div class="coluna-header">
+          <span class="coluna-titulo">\${col.titulo}</span>
+          <span class="coluna-count">\${cards.length}</span>
+        </div>
+        <div class="coluna-cards">
+          \${cards.length === 0 ? '<div style="padding:12px;text-align:center;color:#333;font-size:11px">Nenhum lead</div>' :
+            cards.map(c => \`
+              <div class="card" onclick="abrirChatDoCard('\${c.telefone}')">
+                <div class="card-phone">\${c.formatado}</div>
+                \${c.veiculo ? \`<div class="card-veiculo">🚗 \${c.veiculo}</div>\` : ''}
+                <div class="card-preview">\${c.ultimaMensagem || 'Sem mensagens'}</div>
+                <div class="card-footer">
+                  <span class="card-tempo">\${c.tempoLabel}</span>
+                </div>
+                <div class="card-acoes" onclick="event.stopPropagation()">
+                  <button class="card-btn card-btn-chat" onclick="abrirChatDoCard('\${c.telefone}')">💬 Chat</button>
+                  <button class="card-btn card-btn-followup" onclick="followUpRapido('\${c.telefone}')">⏰ Follow-up</button>
+                  <button class="card-btn card-btn-mover" onclick="moverRapido('\${c.telefone}')">↕ Mover</button>
+                </div>
+              </div>
+            \`).join('')}
+        </div>
+      </div>\`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Erro ao carregar';
+  }
+}
+
+async function abrirChatDoCard(telefone) {
+  mostrarViewDireto('chat');
+  await abrirConversa(telefone);
+}
+
+function mostrarViewDireto(view) {
+  viewAtiva = view;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-' + view).classList.add('active');
+  document.querySelectorAll('.nav-tab')[view === 'kanban' ? 0 : 1].classList.add('active');
+  if (view === 'chat') carregarConversas();
+}
+
+async function moverRapido(telefone) {
+  conversaAtiva = telefone;
+  abrirModalMover();
+}
+
+async function followUpRapido(telefone) {
+  const motivo = prompt('Motivo:\\n- vai_pensar (1d)\\n- achou_caro (3d)\\n- avaliacao_baixa (5d)\\n- sem_interesse (7d)\\n- sumiu (5d)');
+  if (!motivo) return;
+  const dias = prompt('Em quantos dias?');
+  if (!dias) return;
+  await fetch(API + '/painel/followup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: telefone, motivo, dias: parseInt(dias) })
+  });
+  alert('✅ Follow-up agendado!');
 }
 
 async function carregarConversas() {
@@ -1051,18 +1132,19 @@ async function carregarConversas() {
     const res = await fetch(API + '/painel/conversas');
     const data = await res.json();
     const list = document.getElementById('convList');
-    if (!data.conversas || data.conversas.length === 0) {
-      list.innerHTML = '<div class="loading">Nenhuma conversa ainda</div>';
-      document.getElementById('statusText').textContent = 'Nenhuma conversa ativa';
+    if (!data.conversas?.length) {
+      list.innerHTML = '<div class="loading-txt">Nenhuma conversa</div>';
+      document.getElementById('statusText').textContent = 'Sem conversas';
       return;
     }
     list.innerHTML = data.conversas.map(c =>
-      '<div class="conv-item ' + (c.from === conversaAtiva ? 'active' : c.naoLida > 0 ? 'unread' : '') + '" onclick="abrirConversa(\\'' + c.from + '\\')">' +
-      '<div class="conv-phone">' + formatarTelefone(c.from) + (c.naoLida > 0 ? '<span class="conv-badge">' + c.naoLida + '</span>' : '') + '</div>' +
-      '<div class="conv-preview">' + (c.ultimaMensagem || '') + '</div>' +
-      '<div class="conv-time">' + formatarHora(c.ultimaAtividade) + '</div></div>'
+      \`<div class="conv-item \${c.from === conversaAtiva ? 'active' : c.naoLida > 0 ? 'unread' : ''}" onclick="abrirConversa('\${c.from}')">
+        <div class="conv-phone">\${formatarTelefone(c.from)}\${c.naoLida > 0 ? \`<span class="conv-badge">\${c.naoLida}</span>\` : ''}</div>
+        <div class="conv-preview">\${c.ultimaMensagem || ''}</div>
+        <div class="conv-time">\${formatarHora(c.ultimaAtividade)}</div>
+      </div>\`
     ).join('');
-    document.getElementById('statusText').textContent = data.conversas.length + ' conversa(s) ativa(s)';
+    document.getElementById('statusText').textContent = data.conversas.length + ' conversa(s)';
   } catch(e) { document.getElementById('statusText').textContent = 'Erro de conexão'; }
 }
 
@@ -1071,7 +1153,26 @@ async function abrirConversa(from) {
   document.getElementById('chatPhone').textContent = formatarTelefone(from);
   document.getElementById('chatActions').style.display = 'flex';
   document.getElementById('interventionArea').style.display = 'block';
-  await fetch(API + '/painel/visualizar', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from }) });
+
+  await fetch(API + '/painel/visualizar', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from })
+  });
+
+  // Busca estágio do cliente
+  try {
+    const res = await fetch(API + '/crm');
+    const data = await res.json();
+    let estagio = null;
+    Object.entries(data).forEach(([key, cards]) => {
+      if (cards.some(c => c.telefone === from)) estagio = key;
+    });
+    if (estagio && ESTAGIOS[estagio]) {
+      document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
+    }
+  } catch(e) {}
+
   await carregarMensagens(from);
   await carregarConversas();
 }
@@ -1081,12 +1182,13 @@ async function carregarMensagens(from) {
     const res = await fetch(API + '/painel/mensagens/' + from);
     const data = await res.json();
     const msgs = document.getElementById('messages');
-    if (!data.mensagens || data.mensagens.length === 0) { msgs.innerHTML = '<div class="loading">Nenhuma mensagem</div>'; return; }
+    if (!data.mensagens?.length) { msgs.innerHTML = '<div class="empty-state">Nenhuma mensagem</div>'; return; }
     msgs.innerHTML = data.mensagens.map(m =>
-      '<div class="msg ' + m.tipo + '">' +
-      '<div class="msg-label">' + (m.tipo === 'client' ? '👤 Cliente' : m.tipo === 'sara' ? '🤖 Sarah' : '⚡ Você') + '</div>' +
-      '<div class="msg-bubble">' + (m.texto || '').replace(/\\n/g, '<br>') + '</div>' +
-      '<div class="msg-meta">' + formatarHora(m.criado_em) + '</div></div>'
+      \`<div class="msg \${m.tipo}">
+        <div class="msg-label">\${m.tipo === 'client' ? '👤 Cliente' : m.tipo === 'sara' ? '🤖 Sarah' : '⚡ Você'}</div>
+        <div class="msg-bubble">\${(m.texto || '').replace(/\\n/g, '<br>')}</div>
+        <div class="msg-meta">\${formatarHora(m.criado_em)}</div>
+      </div>\`
     ).join('');
     msgs.scrollTop = msgs.scrollHeight;
   } catch(e) {}
@@ -1096,82 +1198,96 @@ async function enviarIntervencao() {
   if (!conversaAtiva) return;
   const texto = document.getElementById('interventionText').value.trim();
   if (!texto) return;
-  const res = await fetch(API + '/painel/intervencao', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva, texto }) });
+  const res = await fetch(API + '/painel/intervencao', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: conversaAtiva, texto })
+  });
   if (res.ok) { document.getElementById('interventionText').value = ''; await carregarMensagens(conversaAtiva); }
+}
+
+function abrirModalMover() {
+  if (!conversaAtiva) return;
+  document.getElementById('modalMover').classList.add('open');
+}
+
+function fecharModal() {
+  document.getElementById('modalMover').classList.remove('open');
+}
+
+async function moverLead(estagio) {
+  if (!conversaAtiva) return;
+  await fetch(API + '/crm/mover', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ telefone: conversaAtiva, estagio })
+  });
+  fecharModal();
+  if (ESTAGIOS[estagio]) {
+    document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
+  }
+  await carregarKanban();
+  alert('✅ Lead movido para ' + ESTAGIOS[estagio]?.label);
 }
 
 async function agendarFollowUpManual() {
   if (!conversaAtiva) return;
-  const motivo = prompt('Motivo:\\n- vai_pensar (1 dia)\\n- achou_caro (3 dias)\\n- avaliacao_baixa (5 dias)\\n- sem_interesse (7 dias)\\n- sumiu (5 dias)');
+  const motivo = prompt('Motivo:\\n- vai_pensar (1d)\\n- achou_caro (3d)\\n- avaliacao_baixa (5d)\\n- sem_interesse (7d)\\n- sumiu (5d)');
   if (!motivo) return;
   const dias = prompt('Em quantos dias enviar?');
   if (!dias) return;
-  const res = await fetch(API + '/painel/followup', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) }) });
-  if (res.ok) alert('✅ Follow-up agendado para ' + dias + ' dias!');
+  await fetch(API + '/painel/followup', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) })
+  });
+  alert('✅ Follow-up agendado!');
 }
 
-async function salvarAprendizado() {
+async function abrirAprendizado() {
   if (!conversaAtiva) return;
   const situacao = prompt('Descreva a situação:');
   if (!situacao) return;
   const correcao = prompt('Como a Sarah deveria responder?');
   if (!correcao) return;
-  await fetch(API + '/painel/aprendizado', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ situacao, correcao }) });
-  await carregarAprendizados();
+  await fetch(API + '/painel/aprendizado', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ situacao, correcao })
+  });
   alert('✅ Aprendizado salvo!');
 }
 
 async function marcarResolvido() {
   if (!conversaAtiva) return;
-  await fetch(API + '/painel/resolver', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ from: conversaAtiva }) });
+  if (!confirm('Marcar conversa como resolvida?')) return;
+  await fetch(API + '/painel/resolver', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ from: conversaAtiva })
+  });
   conversaAtiva = null;
   document.getElementById('chatPhone').textContent = 'Selecione uma conversa';
+  document.getElementById('chatEstagio').innerHTML = '';
   document.getElementById('chatActions').style.display = 'none';
   document.getElementById('interventionArea').style.display = 'none';
-  document.getElementById('messages').innerHTML = '<div class="empty-state"><span>Selecione uma conversa</span></div>';
+  document.getElementById('messages').innerHTML = '<div class="empty-state">Selecione uma conversa</div>';
   await carregarConversas();
 }
 
-async function carregarAprendizados() {
-  try {
-    const res = await fetch(API + '/painel/aprendizados');
-    const data = await res.json();
-    const list = document.getElementById('learningList');
-    if (!data.aprendizados || data.aprendizados.length === 0) { list.innerHTML = '<div class="loading" style="color:#555">Nenhum aprendizado ainda</div>'; return; }
-    list.innerHTML = data.aprendizados.map(a => '<div class="learning-item"><div class="situation">📌 ' + a.situacao + '</div><div class="correction">✓ ' + (a.correcao || '').substring(0,100) + '</div></div>').join('');
-    document.getElementById('learningCount').textContent = data.aprendizados.length + ' aprendizado(s)';
-  } catch(e) {}
-}
-
-async function carregarFollowups() {
-  try {
-    const res = await fetch(API + '/followups');
-    const data = await res.json();
-    const list = document.getElementById('followupList');
-    if (!data.followups || data.followups.length === 0) { list.innerHTML = '<div class="loading" style="color:#555">Nenhum follow-up ainda</div>'; return; }
-    const pendentes = data.followups.filter(f => !f.enviado);
-    const enviados = data.followups.filter(f => f.enviado);
-    list.innerHTML =
-      (pendentes.length > 0 ? '<div style="padding:8px;font-size:11px;color:#f0a500;font-weight:600">PENDENTES (' + pendentes.length + ')</div>' : '') +
-      pendentes.map(f => '<div class="followup-item"><div class="fu-phone">' + formatarTelefone(f.telefone) + '</div><div class="fu-motivo">📌 ' + f.motivo + (f.veiculo_interesse ? ' — ' + f.veiculo_interesse : '') + '</div><div class="fu-data">⏰ ' + formatarData(f.agendado_para) + '</div></div>').join('') +
-      (enviados.length > 0 ? '<div style="padding:8px;font-size:11px;color:#555;font-weight:600">ENVIADOS (' + enviados.length + ')</div>' : '') +
-      enviados.slice(0,5).map(f => '<div class="followup-item" style="opacity:0.4"><div class="fu-phone">' + formatarTelefone(f.telefone) + ' ✓</div><div class="fu-motivo">' + f.motivo + '</div></div>').join('');
-    document.getElementById('followupCount').textContent = pendentes.length + ' pendente(s)';
-  } catch(e) {}
-}
-
-document.getElementById('interventionText').addEventListener('keydown', function(e) {
+document.getElementById('interventionText').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarIntervencao(); }
 });
 
+document.getElementById('modalMover').addEventListener('click', e => {
+  if (e.target === document.getElementById('modalMover')) fecharModal();
+});
+
 async function atualizar() {
-  await carregarConversas();
-  if (conversaAtiva) await carregarMensagens(conversaAtiva);
+  if (viewAtiva === 'kanban') await carregarKanban();
+  if (viewAtiva === 'chat') {
+    await carregarConversas();
+    if (conversaAtiva) await carregarMensagens(conversaAtiva);
+  }
 }
 
-carregarConversas();
-carregarAprendizados();
-setInterval(atualizar, 5000);
+carregarKanban();
+setInterval(atualizar, 8000);
 </script>
 </body>
 </html>`;
