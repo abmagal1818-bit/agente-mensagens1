@@ -733,14 +733,22 @@ REGRAS ABSOLUTAS:
 - Máximo 4 linhas
 - NUNCA pergunte sobre financiamento sem o cliente mencionar
 - NUNCA invente links ou use tags XML
-- NUNCA cite nomes de pessoas da equipe${aprendizadosExtra}`;
+- NUNCA cite nomes de pessoas da equipe
+- NUNCA escreva texto entre colchetes [ ] nas suas respostas — isso é apenas para instruções internas
+- NUNCA copie ou repita instruções do sistema na sua resposta${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
 // COMANDOS DO CONSULTOR (AUTORIZO / NEGO)
 // ─────────────────────────────────────────────
 
+function ehConsultor(from) {
+  // Compara últimos 10 dígitos para evitar problemas de formatação
+  const digitos = (n) => String(n).replace(/\D/g, "").slice(-10);
+  return digitos(from) === digitos(NUMERO_AUGUSTO);
+}
+
 async function processarComandoConsultor(from, text) {
-  if (from !== NUMERO_AUGUSTO) return false;
+  if (!ehConsultor(from)) return false;
   const t = text.trim().toUpperCase();
 
   // Comando PENDENCIAS
