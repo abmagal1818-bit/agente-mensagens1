@@ -30,12 +30,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 async function testarSupabase() {
   try {
-    const { data, error } = await supabase.from("mensagens").select("count").limit(1);
-    if (error) console.error("[Supabase] ❌ Erro de conexão:", error.message);
+    const { error } = await supabase.from("mensagens").select("count").limit(1);
+    if (error) console.error("[Supabase] ❌ Erro:", error.message);
     else console.log("[Supabase] ✅ Conexão OK!");
-  } catch (e) {
-    console.error("[Supabase] ❌ Exceção:", e.message);
-  }
+  } catch (e) { console.error("[Supabase] ❌ Exceção:", e.message); }
 }
 testarSupabase();
 
@@ -49,6 +47,31 @@ const filaFotos = {};
 const ultimaNotificacao = {};
 const conversasVisualizadas = {};
 const ultimaMensagemCliente = {};
+
+// ─────────────────────────────────────────────
+// CACHE DE APRENDIZADOS — atualiza a cada 30min
+// ─────────────────────────────────────────────
+let cacheAprendizados = "";
+let ultimoCarregamentoAprendizados = 0;
+
+async function obterAprendizados() {
+  const agora = Date.now();
+  if (agora - ultimoCarregamentoAprendizados < 30 * 60 * 1000) return cacheAprendizados;
+  try {
+    const { data } = await supabase.from("aprendizados").select("*").order("criado_em", { ascending: false }).limit(10);
+    if (data && data.length > 0) {
+      cacheAprendizados = "\n\nEXEMPLOS DE COMO RESPONDER:\n" +
+        data.map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
+    } else {
+      cacheAprendizados = "";
+    }
+    ultimoCarregamentoAprendizados = agora;
+    console.log(`[Cache] Aprendizados atualizados: ${data?.length || 0} itens`);
+  } catch (e) {
+    console.error("[Cache] Erro aprendizados:", e.message);
+  }
+  return cacheAprendizados;
+}
 
 // ─────────────────────────────────────────────
 // UTILITÁRIOS
@@ -72,26 +95,78 @@ function clienteEstaEmFluxoTroca(historicoConversa) {
     historico.includes("manda umas fotos");
 }
 
+// Detecta mensagens curtas que não precisam de extração
+function ehMensagemSimples(texto) {
+  const t = texto.toLowerCase().trim();
+  const simples = ["sim", "não", "nao", "ok", "obrigado", "obrigada", "valeu", "certo",
+    "tá", "ta", "tá bom", "ta bom", "pode ser", "claro", "perfeito", "ótimo", "otimo",
+    "entendi", "entendido", "combinado", "até", "ate", "tchau", "abraço", "abs"];
+  return simples.includes(t) || t.length < 8;
+}
+
+// ─────────────────────────────────────────────
+// EXTRAÇÃO UNIFICADA — 1 chamada Haiku por msg
+// ─────────────────────────────────────────────
+
+async function extrairContextoConversa(textos, ehSimples = false) {
+  if (ehSimples) return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
+  try {
+    const res = await axios.post("https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-haiku-4-5",
+        max_tokens: 200,
+        messages: [{
+          role: "user",
+          content: `Analise essa conversa e extraia DUAS informações em JSON:
+1. Veículo que cliente quer VENDER/TROCAR (não o que quer comprar)
+2. Veículo que cliente quer COMPRAR/PROCURAR
+
+Responda APENAS JSON válido:
+{"troca": {"marca": null, "modelo": null, "ano": null}, "busca": {"modelo": null, "ano": null}}
+
+Exemplos:
+- "tenho um gol 2012, quero uma renegade" → {"troca": {"marca": "volkswagen", "modelo": "gol", "ano": "2012"}, "busca": {"modelo": "renegade", "ano": null}}
+- "quero ver um compass 2020" → {"troca": {"marca": null, "modelo": null, "ano": null}, "busca": {"modelo": "compass", "ano": "2020"}}
+- "quanto fica o financiamento?" → {"troca": {"marca": null, "modelo": null, "ano": null}, "busca": {"modelo": null, "ano": null}}
+
+Texto: "${textos.slice(-5).join(" | ")}"`
+        }]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+    const jsonMatch = res.data.content[0].text.trim().match(/\{[\s\S]+\}/);
+    if (!jsonMatch) return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
+    const json = JSON.parse(jsonMatch[0]);
+    return {
+      marcaTroca: json.troca?.marca || null,
+      modeloTroca: json.troca?.modelo || null,
+      anoTroca: json.troca?.ano || null,
+      modeloBuscado: json.busca?.modelo || null,
+      anoBuscado: json.busca?.ano || null
+    };
+  } catch (e) {
+    console.error("[Extração] Erro:", e.message);
+    return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
+  }
+}
+
 // ─────────────────────────────────────────────
 // SUPABASE — MENSAGENS
 // ─────────────────────────────────────────────
 
 async function salvarMensagem(telefone, tipo, texto) {
   try {
-    console.log(`[Supabase] Salvando mensagem: ${telefone} | ${tipo}`);
+    console.log(`[Supabase] Salvando: ${telefone} | ${tipo}`);
     const { error } = await supabase.from("mensagens").insert({
       telefone, tipo, texto: String(texto).substring(0, 500)
     });
-    if (error) console.error("[Supabase] ❌ Erro insert:", error.message, JSON.stringify(error));
-    else console.log(`[Supabase] ✅ Mensagem salva: ${telefone} | ${tipo}`);
-
+    if (error) console.error("[Supabase] ❌ Erro insert:", error.message);
+    else console.log(`[Supabase] ✅ Salvo: ${telefone} | ${tipo}`);
     const { error: e2 } = await supabase.from("clientes").upsert({
       telefone, ultima_interacao: new Date().toISOString()
     }, { onConflict: "telefone" });
     if (e2) console.error("[Supabase] ❌ Erro upsert cliente:", e2.message);
-  } catch (e) {
-    console.error("[Supabase] ❌ Exceção salvarMensagem:", e.message);
-  }
+  } catch (e) { console.error("[Supabase] ❌ Exceção:", e.message); }
 }
 
 async function buscarMensagens(telefone) {
@@ -120,107 +195,54 @@ async function listarConversas() {
 }
 
 // ─────────────────────────────────────────────
-// SUPABASE — CRM ESTÁGIOS
+// CRM — ESTÁGIOS
 // ─────────────────────────────────────────────
 
 async function atualizarEstagio(telefone, estagio, veiculo = null) {
   try {
-    const { error } = await supabase.from("clientes").upsert({
-      telefone,
-      estagio,
-      veiculo_interesse: veiculo,
-      ultima_interacao: new Date().toISOString()
-    }, { onConflict: "telefone" });
-    if (error) console.error("[CRM] Erro atualizarEstagio:", error.message);
-    else console.log(`[CRM] Estágio atualizado: ${telefone} → ${estagio}`);
-  } catch (e) {
-    console.error("[CRM] Erro:", e.message);
-  }
+    const update = { telefone, estagio, ultima_interacao: new Date().toISOString() };
+    if (veiculo) update.veiculo_interesse = veiculo;
+    const { error } = await supabase.from("clientes").upsert(update, { onConflict: "telefone" });
+    if (!error) console.log(`[CRM] ${telefone} → ${estagio}`);
+  } catch (e) { console.error("[CRM] Erro:", e.message); }
 }
 
 async function detectarEstagio(from, text, historico) {
   const t = text.toLowerCase();
   const hist = (historico || []).map(m => m.content || "").join(" ").toLowerCase();
-
-  // Fechado
-  if (t.includes("fechei") || t.includes("comprei") || t.includes("fechar negócio") || t.includes("vou comprar")) {
-    await atualizarEstagio(from, "fechado"); return;
-  }
-  // Visita agendada
-  if (t.includes("vou aí") || t.includes("vou até") || t.includes("vou visitar") || t.includes("passo aí") ||
-    t.includes("apareço") || t.includes("amanhã lá") || t.includes("vou na loja")) {
-    await atualizarEstagio(from, "visita_agendada"); return;
-  }
-  // Em negociação — simulou, pediu fotos, avaliou troca
-  if (hist.includes("financiar") || hist.includes("parcela") || hist.includes("simulação") ||
-    hist.includes("na troca") || hist.includes("pra troca") || hist.includes("fotos")) {
-    await atualizarEstagio(from, "negociacao"); return;
-  }
-  // Frio
-  if (t.includes("não tenho interesse") || t.includes("desisti") || t.includes("esquece") || t.includes("não quero mais")) {
-    await atualizarEstagio(from, "frio"); return;
-  }
-  // Aguardando
-  if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) {
-    await atualizarEstagio(from, "aguardando"); return;
-  }
-  // Quente — primeira mensagem ou engajado
+  if (t.includes("fechei") || t.includes("comprei") || t.includes("vou comprar")) { await atualizarEstagio(from, "fechado"); return; }
+  if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir")) { await atualizarEstagio(from, "visita_agendada"); return; }
+  if (hist.includes("parcela") || hist.includes("simulação") || hist.includes("financiar") || hist.includes("na troca") || hist.includes("fotos")) { await atualizarEstagio(from, "negociacao"); return; }
+  if (t.includes("não tenho interesse") || t.includes("desisti") || t.includes("esquece")) { await atualizarEstagio(from, "frio"); return; }
+  if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) { await atualizarEstagio(from, "aguardando"); return; }
   const { data } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
-  if (!data || !data[0] || !data[0].estagio) {
-    await atualizarEstagio(from, "quente");
-  }
+  if (!data?.[0]?.estagio) await atualizarEstagio(from, "quente");
 }
 
 async function buscarLeadsCRM() {
   try {
     const { data: clientes } = await supabase.from("clientes").select("*").order("ultima_interacao", { ascending: false });
     const { data: mensagens } = await supabase.from("mensagens").select("telefone, texto, tipo, criado_em").order("criado_em", { ascending: false });
-
     if (!clientes) return {};
-
     const ultimaMsg = {};
-    if (mensagens) {
-      mensagens.forEach(m => { if (!ultimaMsg[m.telefone]) ultimaMsg[m.telefone] = m; });
-    }
-
+    if (mensagens) mensagens.forEach(m => { if (!ultimaMsg[m.telefone]) ultimaMsg[m.telefone] = m; });
     const kanban = { quente: [], negociacao: [], aguardando: [], visita_agendada: [], frio: [], fechado: [] };
-
     clientes.forEach(c => {
       const estagio = c.estagio || "quente";
-      const ultima = ultimaMsg[c.telefone];
       const agora = Date.now();
       const ultimaAtividade = c.ultima_interacao ? new Date(c.ultima_interacao).getTime() : agora;
       const minutosAtras = Math.floor((agora - ultimaAtividade) / 60000);
       const horasAtras = Math.floor(minutosAtras / 60);
       const diasAtras = Math.floor(horasAtras / 24);
-
-      let tempoLabel = "";
-      if (diasAtras > 0) tempoLabel = `${diasAtras}d atrás`;
-      else if (horasAtras > 0) tempoLabel = `${horasAtras}h atrás`;
-      else tempoLabel = `${minutosAtras}min atrás`;
-
+      const tempoLabel = diasAtras > 0 ? `${diasAtras}d atrás` : horasAtras > 0 ? `${horasAtras}h atrás` : `${minutosAtras}min atrás`;
       const numero = c.telefone.replace(/\D/g, "");
       const formatado = numero.length >= 12 ? `(${numero.slice(2, 4)}) ${numero.slice(4, 9)}-${numero.slice(9)}` : c.telefone;
-
-      const card = {
-        telefone: c.telefone,
-        formatado,
-        estagio,
-        veiculo: c.veiculo_interesse || "",
-        ultimaMensagem: ultima?.texto?.substring(0, 60) || "",
-        tempoLabel,
-        ultimaAtividade: c.ultima_interacao
-      };
-
+      const card = { telefone: c.telefone, formatado, estagio, veiculo: c.veiculo_interesse || "", ultimaMensagem: ultimaMsg[c.telefone]?.texto?.substring(0, 60) || "", tempoLabel, ultimaAtividade: c.ultima_interacao };
       if (kanban[estagio]) kanban[estagio].push(card);
       else kanban.quente.push(card);
     });
-
     return kanban;
-  } catch (e) {
-    console.error("[CRM] Erro buscarLeadsCRM:", e.message);
-    return {};
-  }
+  } catch (e) { console.error("[CRM] Erro buscarLeadsCRM:", e.message); return {}; }
 }
 
 // ─────────────────────────────────────────────
@@ -230,6 +252,7 @@ async function buscarLeadsCRM() {
 async function salvarAprendizado(situacao, correcao) {
   try {
     await supabase.from("aprendizados").insert({ situacao, correcao });
+    ultimoCarregamentoAprendizados = 0; // força reload do cache
   } catch (e) { console.error("[Supabase] Erro salvarAprendizado:", e.message); }
 }
 
@@ -240,15 +263,8 @@ async function buscarAprendizados() {
   } catch (e) { return []; }
 }
 
-async function formatarAprendizados() {
-  const aprendizados = await buscarAprendizados();
-  if (!aprendizados.length) return "";
-  return "\n\nEXEMPLOS DE COMO RESPONDER:\n" +
-    aprendizados.slice(0, 10).map(a => `Situação: ${a.situacao}\nResposta correta: ${a.correcao}`).join("\n---\n");
-}
-
 // ─────────────────────────────────────────────
-// SUPABASE — FOLLOW-UPS
+// FOLLOW-UPS
 // ─────────────────────────────────────────────
 
 async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar) {
@@ -260,8 +276,8 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar)
       telefone, motivo, veiculo_interesse: veiculoInteresse,
       agendado_para: agendadoPara.toISOString(), enviado: false
     });
-    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${diasAguardar} dias — ${motivo}`);
-  } catch (e) { console.error("[FollowUp] Erro agendarFollowUp:", e.message); }
+    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${diasAguardar}d — ${motivo}`);
+  } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
 
 async function detectarLeadFrio(from, text, historicoConversa) {
@@ -269,19 +285,14 @@ async function detectarLeadFrio(from, text, historicoConversa) {
     const t = text.toLowerCase();
     const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
     let motivo = null, dias = 1;
-
-    const frasesPensar = ["vou pensar", "preciso pensar", "deixa eu pensar", "vou ver", "deixa eu ver", "vou decidir", "vou falar com minha esposa", "vou falar com meu marido", "vou falar com a minha esposa", "vou falar com o meu marido", "vou consultar", "vou falar com a família", "retorno em breve", "depois te aviso", "vou dar um retorno", "vou retornar", "depois eu volto", "vou conversar com"];
+    const frasesPensar = ["vou pensar", "preciso pensar", "deixa eu pensar", "vou ver", "vou decidir", "vou falar com minha esposa", "vou falar com meu marido", "vou falar com a minha esposa", "vou falar com o meu marido", "vou consultar", "vou falar com a família", "retorno em breve", "depois te aviso", "vou dar um retorno", "vou retornar", "depois eu volto", "vou conversar com"];
     if (frasesPensar.some(f => t.includes(f))) { motivo = "vai_pensar"; dias = 1; }
-
     const frasesCaro = ["tá caro", "está caro", "muito caro", "caro demais", "não tenho condição", "não tenho dinheiro", "sem condição", "tá pesado", "fora do meu orçamento", "acima do meu orçamento", "não cabe no bolso", "não tenho esse valor", "não consigo", "não tenho como"];
     if (!motivo && frasesCaro.some(f => t.includes(f))) { motivo = "achou_caro"; dias = 3; }
-
     const frasesAvaliacao = ["avaliação baixa", "pouco pelo meu", "esperava mais", "vale mais", "não compensa", "achei pouco", "muito pouco"];
     if (!motivo && frasesAvaliacao.some(f => t.includes(f))) { motivo = "avaliacao_baixa"; dias = 5; }
-
     const frasesSemInteresse = ["não tenho interesse", "desisti", "não quero mais", "mudei de ideia", "cancelar", "esquece", "deixa pra lá"];
     if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; dias = 7; }
-
     if (!motivo) return;
     const vm = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
     await agendarFollowUp(from, motivo, vm ? vm[0] : null, dias);
@@ -294,7 +305,7 @@ async function verificarClientesSumidos() {
     for (const [telefone, ultima] of Object.entries(ultimaMensagemCliente)) {
       if (agora - ultima > 24 * 60 * 60 * 1000) {
         const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
-        if (!data || !data.length) {
+        if (!data?.length) {
           const hist = (conversas[telefone] || []).map(m => m.content || "").join(" ").toLowerCase();
           const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid/i);
           await agendarFollowUp(telefone, "sumiu", vm ? vm[0] : null, 5);
@@ -303,7 +314,7 @@ async function verificarClientesSumidos() {
         delete ultimaMensagemCliente[telefone];
       }
     }
-  } catch (e) { console.error("[FollowUp] Erro verificarClientesSumidos:", e.message); }
+  } catch (e) { console.error("[FollowUp] Erro sumidos:", e.message); }
 }
 
 setInterval(verificarClientesSumidos, 60 * 60 * 1000);
@@ -312,14 +323,14 @@ async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
     const prompts = {
-      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas. Um cliente estava interessado em ${veiculo} mas disse que ia pensar. Crie uma mensagem curta e calorosa, sem pressionar. Máximo 3 linhas.`,
-      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Um cliente achou o ${veiculo} caro. Pergunte qual parcela cabe no orçamento. Máximo 3 linhas.`,
-      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Cliente insatisfeito com avaliação na troca. Reforce que a avaliação presencial pode surpreender. Máximo 3 linhas.`,
-      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Cliente sem interesse. Mensagem muito leve perguntando se posso ajudar. Máximo 2 linhas.`,
+      vai_pensar: `Você é Sarah, vendedora da Premium Automarcas. Cliente interessado em ${veiculo} disse que ia pensar. Mensagem curta e calorosa de reativação, sem pressionar. Máximo 3 linhas.`,
+      achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Cliente achou ${veiculo} caro. Pergunte qual parcela cabe no orçamento. Máximo 3 linhas.`,
+      avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Cliente insatisfeito com avaliação na troca. Reforce que avaliação presencial pode surpreender. Máximo 3 linhas.`,
+      sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Cliente sem interesse. Mensagem muito leve. Máximo 2 linhas.`,
       sumiu: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar. Máximo 2 linhas.`
     };
     const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
+      { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
@@ -368,6 +379,7 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: mensagem } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
+    console.log(`[Notificação] ✅ ${primeiraVez ? "Novo" : "Update"} — ${formatado}`);
   } catch (e) { console.error(`[Notificação] Erro:`, e.message); }
 }
 
@@ -384,7 +396,7 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
 }
 
 // ─────────────────────────────────────────────
-// INSTAGRAM
+// INSTAGRAM — SINCRONIZAÇÃO A CADA 30 MIN
 // ─────────────────────────────────────────────
 
 async function buscarEstoqueInstagram() {
@@ -432,6 +444,14 @@ async function sincronizarEstoque() {
 sincronizarEstoque();
 setInterval(sincronizarEstoque, 30 * 60 * 1000);
 
+// Keep Alive — mantém servidor acordado no Render gratuito
+setInterval(async () => {
+  try {
+    await axios.get("https://agente-mensagens1.onrender.com");
+    console.log("[KeepAlive] ✅ Servidor ativo");
+  } catch (e) { console.error("[KeepAlive] Erro:", e.message); }
+}, 10 * 60 * 1000);
+
 // ─────────────────────────────────────────────
 // FIPE
 // ─────────────────────────────────────────────
@@ -441,21 +461,6 @@ async function getMarcasFipe() {
   const res = await axios.get("https://parallelum.com.br/fipe/api/v1/carros/marcas");
   cacheMarcasFipe = res.data;
   return cacheMarcasFipe;
-}
-
-async function extrairVeiculoParaTroca(textos) {
-  try {
-    const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-sonnet-4-5", max_tokens: 150, messages: [{ role: "user", content: `Extraia o veículo que o cliente quer VENDER ou DAR NA TROCA.
-Responda APENAS em JSON: {"marca": "...", "modelo": "...", "ano": "..."}
-Use nomes simples. Se não encontrar, coloque null.
-Texto: "${textos.join(" ")}"` }] },
-      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-    );
-    const jsonMatch = res.data.content[0].text.trim().match(/\{[^}]+\}/);
-    if (!jsonMatch) return { marca: null, modelo: null, ano: null };
-    return JSON.parse(jsonMatch[0]);
-  } catch (e) { return { marca: null, modelo: null, ano: null }; }
 }
 
 async function consultarFipe(marca, modelo, ano) {
@@ -514,7 +519,7 @@ async function analisarImagem(mediaId, caption) {
     const imageRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
     const base64Image = Buffer.from(imageRes.data).toString("base64");
     const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-sonnet-4-5", max_tokens: 200, messages: [{ role: "user", content: [
+      { model: "claude-haiku-4-5", max_tokens: 200, messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: mediaRes.data.mime_type || "image/jpeg", data: base64Image } },
         { type: "text", text: `Avaliador de veículos. Descreva em 2 linhas: estado geral, pontos positivos e de atenção. ${caption ? `Contexto: ${caption}` : ""}` }
       ]}] },
@@ -568,21 +573,6 @@ async function enviarFotosVeiculo(to, veiculo) {
   return true;
 }
 
-async function extrairModeloBuscado(textos) {
-  try {
-    const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-sonnet-4-5", max_tokens: 100, messages: [{ role: "user", content: `Extraia o modelo de carro que o cliente quer COMPRAR.
-JSON: {"modelo": "...", "ano": "..."} ou null se não encontrar.
-Texto: "${textos.join(" ")}"` }] },
-      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-    );
-    const jsonMatch = res.data.content[0].text.trim().match(/\{[^}]+\}/);
-    if (!jsonMatch) return null;
-    const json = JSON.parse(jsonMatch[0]);
-    return json.modelo ? json : null;
-  } catch (e) { return null; }
-}
-
 // ─────────────────────────────────────────────
 // SYSTEM PROMPT
 // ─────────────────────────────────────────────
@@ -594,14 +584,14 @@ function formatarEstoque() {
 
 const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
 
-EMPRESA: Av. Aparício Borges, 931 - Porto Alegre/RS | Seg-Sex 8h-18h, Sáb 8h-12h | Consultor: (51) 99364-2476
+EMPRESA: Av. Aparício Borges, 931 | Seg-Sex 8h-18h, Sáb 8h-12h | Consultor: (51) 99364-2476
 
-PERFIL: Simpática, descontraída e profissional. Respostas CURTAS — máximo 4 linhas. NUNCA repita a saudação.
+PERFIL: Simpática, descontraída e profissional. Máximo 4 linhas por resposta. NUNCA repita a saudação após a primeira mensagem. SEMPRE mantenha o contexto da conversa.
 
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
 
-REGRAS DE PREÇO: Use EXATAMENTE os preços do estoque. NUNCA invente ou altere preços.
+REGRAS DE PREÇO: Use EXATAMENTE os preços do estoque. NUNCA invente ou altere.
 
 ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
 1. Informe que não está disponível no momento
@@ -609,24 +599,29 @@ ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNa
 3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
 4. Só ofereça alternativas se tiver algo REALMENTE similar` : ""}
 
-FOTOS: Quando sistema confirmar envio, diga: "Mandei as fotos! O que achou? 😊". NUNCA use tags XML.
+FOTOS: Quando sistema confirmar envio, diga: "Mandei as fotos! O que achou? 😊". NUNCA use tags XML. NUNCA diga que enviou sem confirmação.
 
 PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórcio, À vista
 
 AVALIAÇÃO DE TROCA:
 Etapa 1: km, estado geral, revisões, fotos 📸
 Etapa 2: Agradeça as fotos
-Etapa 3 (só após tudo): ${fipeInfo ? (() => { const v = calcularValoresTroca(fipeInfo.Valor); return `"Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!" NÃO mencione FIPE.`; })() : "NUNCA invente valores."}
+Etapa 3 (só após tudo): ${fipeInfo ? (() => { const v = calcularValoresTroca(fipeInfo.Valor); return `"Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!" NÃO mencione FIPE.`; })() : "NUNCA invente valores de troca."}
 
 QUANDO ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
 QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
 
 FINANCIAMENTO: Taxa 1,8%/mês. PMT = PV × (i×(1+i)^n)/((1+i)^n-1). Só simule se cliente pedir.
+TROCO: Banco financia até FIPE. Valor financiado = preço + troco - saldo troca.
 
-REGRAS: Primeira msg: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!" | Máximo 4 linhas | NUNCA invente links ou use XML${aprendizadosExtra}`;
+REGRAS ABSOLUTAS:
+- Primeira msg: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
+- Máximo 4 linhas
+- NUNCA pergunte sobre financiamento sem o cliente mencionar
+- NUNCA invente links ou use tags XML${aprendizadosExtra}`;
 
 // ─────────────────────────────────────────────
-// PROCESSAMENTO
+// PROCESSAMENTO — OTIMIZADO
 // ─────────────────────────────────────────────
 
 async function processarMensagem(from, text) {
@@ -644,15 +639,17 @@ async function processarMensagem(from, text) {
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
   detectarEstagio(from, text, conversas[from]).catch(() => {});
 
+  // ── EXTRAÇÃO UNIFICADA (1 chamada Haiku) ──
+  const isSimples = ehMensagemSimples(text);
+  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
+  const { marcaTroca, modeloTroca, anoTroca, modeloBuscado, anoBuscado } = await extrairContextoConversa(todosTextos, isSimples);
+
   // Detecta carro não disponível
   let carroNaoDisponivel = null;
-  const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
-  const modeloBuscado = await extrairModeloBuscado(todosTextos);
   if (modeloBuscado) {
-    const modeloNome = modeloBuscado.modelo.toLowerCase();
-    const encontrado = estoqueAtual.some(v => limparTexto(v.modelo || "").toLowerCase().includes(modeloNome));
+    const encontrado = estoqueAtual.some(v => limparTexto(v.modelo || "").toLowerCase().includes(modeloBuscado.toLowerCase()));
     if (!encontrado) {
-      const descricao = `${modeloBuscado.modelo}${modeloBuscado.ano ? ` ${modeloBuscado.ano}` : ""}`;
+      const descricao = `${modeloBuscado}${anoBuscado ? ` ${anoBuscado}` : ""}`;
       carroNaoDisponivel = descricao;
       const jaNotificou = conversas[from].some(m => m.content?.includes("[Sistema: cliente buscou"));
       if (!jaNotificou) {
@@ -676,12 +673,23 @@ async function processarMensagem(from, text) {
     }
   }
 
-  const { marca, modelo, ano } = await extrairVeiculoParaTroca(todosTextos);
+  // Consulta FIPE só se tiver veículo de troca
   let fipeInfo = null;
-  if (marca && modelo && ano) fipeInfo = await consultarFipe(marca, modelo, ano);
+  if (marcaTroca && modeloTroca && anoTroca) {
+    fipeInfo = await consultarFipe(marcaTroca, modeloTroca, anoTroca);
+  }
 
+  // Aprendizados do cache
+  const aprendizadosExtra = await obterAprendizados();
+
+  // ── RESPOSTA PRINCIPAL (1 chamada Sonnet) ──
   const claude = await axios.post("https://api.anthropic.com/v1/messages",
-    { model: "claude-sonnet-4-5", max_tokens: 500, system: SYSTEM_PROMPT(fipeInfo, await formatarAprendizados().catch(() => ""), carroNaoDisponivel), messages: conversas[from] },
+    {
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel),
+      messages: conversas[from]
+    },
     { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
   );
 
@@ -708,10 +716,9 @@ async function processarFotosAgrupadas(from, analises) {
 // ROTAS
 // ─────────────────────────────────────────────
 
-app.get("/", (req, res) => res.send("Agente funcionando!"));
+app.get("/", (req, res) => res.send("Agente Sarah funcionando! ✅"));
 app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
 app.get("/sincronizar", async (req, res) => { res.send("Iniciado!"); await sincronizarEstoque(); });
-
 app.get("/testar-supabase", async (req, res) => {
   try {
     const { error } = await supabase.from("mensagens").select("count").limit(1);
@@ -719,26 +726,29 @@ app.get("/testar-supabase", async (req, res) => {
     res.json({ ok: true, mensagem: "Supabase conectado!" });
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
-
 app.get("/crm", async (req, res) => {
-  try { res.json(await buscarLeadsCRM()); }
-  catch (e) { res.json({}); }
+  try { res.json(await buscarLeadsCRM()); } catch (e) { res.json({}); }
 });
-
 app.post("/crm/mover", async (req, res) => {
   const { telefone, estagio } = req.body;
   if (!telefone || !estagio) return res.status(400).json({ erro: "Dados inválidos" });
-  try {
-    await atualizarEstagio(telefone, estagio);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ erro: e.message }); }
+  try { await atualizarEstagio(telefone, estagio); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ erro: e.message }); }
 });
-
 app.get("/followups", async (req, res) => {
   try {
     const { data } = await supabase.from("followups").select("*").order("criado_em", { ascending: false }).limit(50);
     res.json({ followups: data || [] });
   } catch (e) { res.json({ followups: [] }); }
+});
+app.get("/testar-notificacao", async (req, res) => {
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: "✅ Sarah funcionando!" } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    res.json({ ok: true });
+  } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
 
 app.get("/webhook", (req, res) => {
@@ -827,120 +837,94 @@ header h1 span { color:#f0a500; }
 .nav-tab { padding:5px 14px; border-radius:6px; font-size:12px; cursor:pointer; color:#888; border:1px solid transparent; transition:all 0.15s; }
 .nav-tab:hover { color:#fff; }
 .nav-tab.active { background:#1e1e1e; color:#f0a500; border-color:#333; }
-
-/* ── VIEWS ── */
 .view { display:none; flex:1; overflow:hidden; }
 .view.active { display:flex; }
-
-/* ── CRM KANBAN ── */
 .kanban { display:flex; gap:12px; padding:16px; overflow-x:auto; flex:1; }
 .kanban::-webkit-scrollbar { height:6px; }
 .kanban::-webkit-scrollbar-track { background:#111; }
 .kanban::-webkit-scrollbar-thumb { background:#333; border-radius:3px; }
-
-.coluna { min-width:240px; max-width:240px; background:#111; border-radius:10px; display:flex; flex-direction:column; border:1px solid #1e1e1e; }
-.coluna-header { padding:12px 14px 8px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #1a1a1a; }
-.coluna-titulo { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
-.coluna-count { font-size:11px; background:#1e1e1e; padding:2px 8px; border-radius:10px; color:#888; }
-
-.coluna-quente .coluna-titulo { color:#ff6b35; }
-.coluna-quente { border-top:2px solid #ff6b35; }
-.coluna-negociacao .coluna-titulo { color:#f0a500; }
-.coluna-negociacao { border-top:2px solid #f0a500; }
-.coluna-aguardando .coluna-titulo { color:#64b5f6; }
-.coluna-aguardando { border-top:2px solid #64b5f6; }
-.coluna-visita .coluna-titulo { color:#81c784; }
-.coluna-visita { border-top:2px solid #81c784; }
-.coluna-frio .coluna-titulo { color:#90a4ae; }
-.coluna-frio { border-top:2px solid #90a4ae; }
-.coluna-fechado .coluna-titulo { color:#ce93d8; }
-.coluna-fechado { border-top:2px solid #ce93d8; }
-
-.coluna-cards { flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }
-.coluna-cards::-webkit-scrollbar { width:4px; }
+.coluna { min-width:230px; max-width:230px; background:#111; border-radius:10px; display:flex; flex-direction:column; border:1px solid #1e1e1e; }
+.coluna-header { padding:10px 12px 8px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #1a1a1a; }
+.coluna-titulo { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
+.coluna-count { font-size:11px; background:#1e1e1e; padding:2px 7px; border-radius:10px; color:#888; }
+.coluna-quente { border-top:2px solid #ff6b35; } .coluna-quente .coluna-titulo { color:#ff6b35; }
+.coluna-negociacao { border-top:2px solid #f0a500; } .coluna-negociacao .coluna-titulo { color:#f0a500; }
+.coluna-aguardando { border-top:2px solid #64b5f6; } .coluna-aguardando .coluna-titulo { color:#64b5f6; }
+.coluna-visita { border-top:2px solid #81c784; } .coluna-visita .coluna-titulo { color:#81c784; }
+.coluna-frio { border-top:2px solid #90a4ae; } .coluna-frio .coluna-titulo { color:#90a4ae; }
+.coluna-fechado { border-top:2px solid #ce93d8; } .coluna-fechado .coluna-titulo { color:#ce93d8; }
+.coluna-cards { flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:7px; }
+.coluna-cards::-webkit-scrollbar { width:3px; }
 .coluna-cards::-webkit-scrollbar-thumb { background:#222; border-radius:2px; }
-
-.card { background:#161616; border-radius:8px; padding:10px 12px; border:1px solid #1e1e1e; cursor:pointer; transition:all 0.15s; }
+.card { background:#161616; border-radius:8px; padding:10px 11px; border:1px solid #1e1e1e; cursor:pointer; transition:all 0.15s; }
 .card:hover { background:#1a1a1a; border-color:#333; transform:translateY(-1px); }
-.card.selecionado { border-color:#f0a500; background:#1a1a14; }
-.card-phone { font-size:13px; font-weight:600; color:#fff; margin-bottom:4px; }
-.card-veiculo { font-size:11px; color:#f0a500; margin-bottom:4px; }
-.card-preview { font-size:11px; color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:6px; }
+.card-phone { font-size:12px; font-weight:600; color:#fff; margin-bottom:3px; }
+.card-veiculo { font-size:10px; color:#f0a500; margin-bottom:3px; }
+.card-preview { font-size:10px; color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:5px; }
 .card-footer { display:flex; align-items:center; justify-content:space-between; }
 .card-tempo { font-size:10px; color:#444; }
-.card-badge { font-size:10px; background:#f44336; color:#fff; padding:1px 5px; border-radius:8px; }
-.card-acoes { display:flex; gap:4px; margin-top:8px; }
-.card-btn { font-size:10px; padding:3px 8px; border-radius:4px; border:none; cursor:pointer; font-weight:500; }
+.card-acoes { display:flex; gap:4px; margin-top:7px; }
+.card-btn { font-size:10px; padding:3px 7px; border-radius:4px; border:none; cursor:pointer; font-weight:500; }
 .card-btn-chat { background:#1e2a1e; color:#81c784; }
 .card-btn-followup { background:#1a1e2a; color:#64b5f6; }
 .card-btn-mover { background:#1e1e1e; color:#888; }
-
-/* ── CHAT VIEW ── */
 .chat-view { flex:1; display:flex; overflow:hidden; }
-.chat-sidebar { width:280px; background:#111; border-right:1px solid #1e1e1e; display:flex; flex-direction:column; }
-.chat-sidebar-header { padding:12px 16px; font-size:11px; color:#666; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid #1a1a1a; }
+.chat-sidebar { width:260px; background:#111; border-right:1px solid #1e1e1e; display:flex; flex-direction:column; }
+.chat-sidebar-header { padding:10px 14px; font-size:10px; color:#666; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid #1a1a1a; }
 .conv-list { flex:1; overflow-y:auto; }
-.conv-item { padding:10px 14px; cursor:pointer; border-bottom:1px solid #141414; transition:background 0.15s; }
+.conv-item { padding:9px 13px; cursor:pointer; border-bottom:1px solid #141414; transition:background 0.15s; }
 .conv-item:hover { background:#161616; }
 .conv-item.active { background:#1a2a1a; border-left:3px solid #f0a500; }
 .conv-item.unread { border-left:3px solid #f44336; }
 .conv-phone { font-size:12px; font-weight:600; color:#fff; }
-.conv-preview { font-size:11px; color:#555; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.conv-time { font-size:10px; color:#444; margin-top:2px; }
+.conv-preview { font-size:10px; color:#555; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.conv-time { font-size:9px; color:#444; margin-top:2px; }
 .conv-badge { display:inline-block; background:#f44336; color:#fff; font-size:9px; padding:1px 5px; border-radius:8px; margin-left:4px; }
-
 .chat-main { flex:1; display:flex; flex-direction:column; }
-.chat-header { padding:10px 18px; background:#111; border-bottom:1px solid #1e1e1e; display:flex; align-items:center; justify-content:space-between; }
-.chat-phone { font-size:14px; font-weight:600; }
-.chat-actions { display:flex; gap:6px; }
-.btn { padding:5px 12px; border-radius:6px; border:none; cursor:pointer; font-size:12px; font-weight:500; transition:opacity 0.15s; }
+.chat-header { padding:9px 16px; background:#111; border-bottom:1px solid #1e1e1e; display:flex; align-items:center; justify-content:space-between; }
+.chat-phone { font-size:13px; font-weight:600; }
+.chat-actions { display:flex; gap:5px; flex-wrap:wrap; }
+.btn { padding:4px 10px; border-radius:6px; border:none; cursor:pointer; font-size:11px; font-weight:500; transition:opacity 0.15s; }
 .btn:hover { opacity:0.85; }
 .btn-primary { background:#f0a500; color:#000; }
 .btn-danger { background:#f44336; color:#fff; }
 .btn-secondary { background:#222; color:#fff; }
 .btn-blue { background:#1565c0; color:#fff; }
-.btn-green { background:#2e7d32; color:#fff; }
-
-.messages { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px; }
-.msg { max-width:75%; }
+.messages { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:7px; }
+.msg { max-width:78%; }
 .msg.client { align-self:flex-start; }
 .msg.sara, .msg.intervencao { align-self:flex-end; }
-.msg-bubble { padding:9px 13px; border-radius:10px; font-size:13px; line-height:1.5; }
+.msg-bubble { padding:8px 12px; border-radius:10px; font-size:13px; line-height:1.5; }
 .msg.client .msg-bubble { background:#1e1e1e; color:#ddd; border-bottom-left-radius:3px; }
 .msg.sara .msg-bubble { background:#1a3a1a; color:#b8e6b8; border-bottom-right-radius:3px; }
 .msg.intervencao .msg-bubble { background:#2a1a00; color:#f0c060; border-bottom-right-radius:3px; border:1px solid #f0a500; }
-.msg-meta { font-size:10px; color:#444; margin-top:2px; }
+.msg-meta { font-size:9px; color:#444; margin-top:2px; }
 .msg.sara .msg-meta, .msg.intervencao .msg-meta { text-align:right; }
 .msg-label { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; color:#555; }
 .msg.sara .msg-label { color:#3a7; text-align:right; }
 .msg.intervencao .msg-label { color:#f0a500; text-align:right; }
-
-.intervention { background:#111; border-top:1px solid #1e1e1e; padding:10px 14px; }
-.intervention-header { font-size:10px; color:#f0a500; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
-.intervention-input { display:flex; gap:8px; }
-.intervention-input textarea { flex:1; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:7px; color:#fff; padding:8px 11px; font-size:13px; resize:none; height:52px; font-family:inherit; }
+.intervention { background:#111; border-top:1px solid #1e1e1e; padding:9px 13px; }
+.intervention-header { font-size:10px; color:#f0a500; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }
+.intervention-input { display:flex; gap:7px; }
+.intervention-input textarea { flex:1; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:7px; color:#fff; padding:7px 10px; font-size:12px; resize:none; height:48px; font-family:inherit; }
 .intervention-input textarea:focus { outline:none; border-color:#f0a500; }
-
-/* ── MODAL MOVER ── */
 .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:center; justify-content:center; }
 .modal-overlay.open { display:flex; }
-.modal { background:#161616; border:1px solid #2a2a2a; border-radius:12px; padding:20px; min-width:300px; }
-.modal h3 { font-size:14px; color:#fff; margin-bottom:14px; }
-.modal-opcoes { display:flex; flex-direction:column; gap:8px; }
-.modal-opcao { padding:10px 14px; border-radius:8px; border:1px solid #2a2a2a; cursor:pointer; font-size:13px; transition:all 0.15s; }
+.modal { background:#161616; border:1px solid #2a2a2a; border-radius:12px; padding:18px; min-width:280px; }
+.modal h3 { font-size:13px; color:#fff; margin-bottom:12px; }
+.modal-opcoes { display:flex; flex-direction:column; gap:7px; }
+.modal-opcao { padding:9px 13px; border-radius:8px; border:1px solid #2a2a2a; cursor:pointer; font-size:12px; transition:all 0.15s; }
 .modal-opcao:hover { border-color:#f0a500; background:#1a1a14; }
-.modal-cancel { margin-top:12px; width:100%; padding:8px; background:#1e1e1e; border:none; border-radius:7px; color:#888; cursor:pointer; font-size:12px; }
-
-.estagio-tag { display:inline-block; font-size:10px; padding:2px 8px; border-radius:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; }
+.modal-cancel { margin-top:10px; width:100%; padding:7px; background:#1e1e1e; border:none; border-radius:7px; color:#888; cursor:pointer; font-size:11px; }
+.estagio-tag { display:inline-block; font-size:10px; padding:2px 7px; border-radius:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-top:2px; }
 .tag-quente { background:#3a1a0a; color:#ff6b35; }
 .tag-negociacao { background:#3a2a00; color:#f0a500; }
 .tag-aguardando { background:#0a1a2a; color:#64b5f6; }
 .tag-visita_agendada { background:#0a2a0a; color:#81c784; }
 .tag-frio { background:#1a1e22; color:#90a4ae; }
 .tag-fechado { background:#1a0a2a; color:#ce93d8; }
-
-.empty-state { flex:1; display:flex; align-items:center; justify-content:center; color:#333; font-size:13px; }
-.loading-txt { text-align:center; padding:20px; color:#444; font-size:12px; }
+.empty-state { flex:1; display:flex; align-items:center; justify-content:center; color:#333; font-size:12px; }
+.loading-txt { text-align:center; padding:16px; color:#444; font-size:11px; }
 </style>
 </head>
 <body>
@@ -948,21 +932,15 @@ header h1 span { color:#f0a500; }
   <h1>Sarah <span>CRM</span> — Premium Automarcas</h1>
   <div class="header-right">
     <div class="nav-tabs">
-      <div class="nav-tab active" onclick="mostrarView('kanban')">📋 Pipeline</div>
-      <div class="nav-tab" onclick="mostrarView('chat')">💬 Conversas</div>
+      <div class="nav-tab active" onclick="mostrarView('kanban', this)">📋 Pipeline</div>
+      <div class="nav-tab" onclick="mostrarView('chat', this)">💬 Conversas</div>
     </div>
     <div class="status"><div class="dot"></div><span id="statusText">Conectando...</span></div>
   </div>
 </header>
-
-<!-- KANBAN VIEW -->
 <div class="view active" id="view-kanban">
-  <div class="kanban" id="kanbanBoard">
-    <div class="loading-txt">Carregando pipeline...</div>
-  </div>
+  <div class="kanban" id="kanbanBoard"><div class="loading-txt">Carregando pipeline...</div></div>
 </div>
-
-<!-- CHAT VIEW -->
 <div class="view" id="view-chat">
   <div class="chat-view">
     <div class="chat-sidebar">
@@ -973,7 +951,7 @@ header h1 span { color:#f0a500; }
       <div class="chat-header">
         <div>
           <div class="chat-phone" id="chatPhone">Selecione uma conversa</div>
-          <div id="chatEstagio" style="margin-top:3px"></div>
+          <div id="chatEstagio"></div>
         </div>
         <div class="chat-actions" id="chatActions" style="display:none">
           <button class="btn btn-blue" onclick="abrirModalMover()">↕ Mover</button>
@@ -993,13 +971,11 @@ header h1 span { color:#f0a500; }
     </div>
   </div>
 </div>
-
-<!-- MODAL MOVER -->
 <div class="modal-overlay" id="modalMover">
   <div class="modal">
     <h3>Mover lead para...</h3>
     <div class="modal-opcoes">
-      <div class="modal-opcao" onclick="moverLead('quente')">🔥 Quente — cliente engajado</div>
+      <div class="modal-opcao" onclick="moverLead('quente')">🔥 Quente — engajado</div>
       <div class="modal-opcao" onclick="moverLead('negociacao')">💬 Em negociação</div>
       <div class="modal-opcao" onclick="moverLead('aguardando')">⏳ Aguardando resposta</div>
       <div class="modal-opcao" onclick="moverLead('visita_agendada')">📅 Visita agendada</div>
@@ -1009,12 +985,10 @@ header h1 span { color:#f0a500; }
     <button class="modal-cancel" onclick="fecharModal()">Cancelar</button>
   </div>
 </div>
-
 <script>
 const API = window.location.origin;
 let conversaAtiva = null;
 let viewAtiva = 'kanban';
-
 const ESTAGIOS = {
   quente: { label: '🔥 Quente', classe: 'tag-quente' },
   negociacao: { label: '💬 Negociação', classe: 'tag-negociacao' },
@@ -1023,7 +997,6 @@ const ESTAGIOS = {
   frio: { label: '❄️ Frio', classe: 'tag-frio' },
   fechado: { label: '✅ Fechado', classe: 'tag-fechado' }
 };
-
 const COLUNAS = [
   { id: 'quente', titulo: '🔥 Quente', classe: 'coluna-quente' },
   { id: 'negociacao', titulo: '💬 Negociação', classe: 'coluna-negociacao' },
@@ -1032,28 +1005,24 @@ const COLUNAS = [
   { id: 'frio', titulo: '❄️ Frio', classe: 'coluna-frio' },
   { id: 'fechado', titulo: '✅ Fechado', classe: 'coluna-fechado' }
 ];
-
-function mostrarView(view) {
+function mostrarView(view, el) {
   viewAtiva = view;
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('view-' + view).classList.add('active');
-  event.target.classList.add('active');
+  if (el) el.classList.add('active');
   if (view === 'kanban') carregarKanban();
   if (view === 'chat') carregarConversas();
 }
-
 function formatarTelefone(num) {
   const n = String(num).replace(/\\D/g, '');
   if (n.length >= 12) return '(' + n.slice(2,4) + ') ' + n.slice(4,9) + '-' + n.slice(9);
   return num;
 }
-
 function formatarHora(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
 }
-
 async function carregarKanban() {
   try {
     const res = await fetch(API + '/crm');
@@ -1062,7 +1031,6 @@ async function carregarKanban() {
     let total = 0;
     Object.values(data).forEach(c => total += c.length);
     document.getElementById('statusText').textContent = total + ' lead(s) no pipeline';
-
     board.innerHTML = COLUNAS.map(col => {
       const cards = data[col.id] || [];
       return \`<div class="coluna \${col.classe}">
@@ -1071,72 +1039,48 @@ async function carregarKanban() {
           <span class="coluna-count">\${cards.length}</span>
         </div>
         <div class="coluna-cards">
-          \${cards.length === 0 ? '<div style="padding:12px;text-align:center;color:#333;font-size:11px">Nenhum lead</div>' :
-            cards.map(c => \`
-              <div class="card" onclick="abrirChatDoCard('\${c.telefone}')">
+          \${cards.length === 0
+            ? '<div style="padding:10px;text-align:center;color:#333;font-size:10px">Vazio</div>'
+            : cards.map(c => \`<div class="card">
                 <div class="card-phone">\${c.formatado}</div>
                 \${c.veiculo ? \`<div class="card-veiculo">🚗 \${c.veiculo}</div>\` : ''}
                 <div class="card-preview">\${c.ultimaMensagem || 'Sem mensagens'}</div>
-                <div class="card-footer">
-                  <span class="card-tempo">\${c.tempoLabel}</span>
-                </div>
-                <div class="card-acoes" onclick="event.stopPropagation()">
+                <div class="card-footer"><span class="card-tempo">\${c.tempoLabel}</span></div>
+                <div class="card-acoes">
                   <button class="card-btn card-btn-chat" onclick="abrirChatDoCard('\${c.telefone}')">💬 Chat</button>
-                  <button class="card-btn card-btn-followup" onclick="followUpRapido('\${c.telefone}')">⏰ Follow-up</button>
-                  <button class="card-btn card-btn-mover" onclick="moverRapido('\${c.telefone}')">↕ Mover</button>
+                  <button class="card-btn card-btn-followup" onclick="followUpRapido('\${c.telefone}')">⏰</button>
+                  <button class="card-btn card-btn-mover" onclick="moverRapido('\${c.telefone}')">↕</button>
                 </div>
-              </div>
-            \`).join('')}
+              </div>\`).join('')}
         </div>
       </div>\`;
     }).join('');
-  } catch(e) {
-    document.getElementById('statusText').textContent = 'Erro ao carregar';
-  }
+  } catch(e) { document.getElementById('statusText').textContent = 'Erro ao carregar'; }
 }
-
 async function abrirChatDoCard(telefone) {
-  mostrarViewDireto('chat');
-  await abrirConversa(telefone);
-}
-
-function mostrarViewDireto(view) {
-  viewAtiva = view;
+  viewAtiva = 'chat';
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('view-' + view).classList.add('active');
-  document.querySelectorAll('.nav-tab')[view === 'kanban' ? 0 : 1].classList.add('active');
-  if (view === 'chat') carregarConversas();
+  document.getElementById('view-chat').classList.add('active');
+  document.querySelectorAll('.nav-tab')[1].classList.add('active');
+  await carregarConversas();
+  await abrirConversa(telefone);
 }
-
-async function moverRapido(telefone) {
-  conversaAtiva = telefone;
-  abrirModalMover();
-}
-
+function moverRapido(telefone) { conversaAtiva = telefone; abrirModalMover(); }
 async function followUpRapido(telefone) {
-  const motivo = prompt('Motivo:\\n- vai_pensar (1d)\\n- achou_caro (3d)\\n- avaliacao_baixa (5d)\\n- sem_interesse (7d)\\n- sumiu (5d)');
+  const motivo = prompt('Motivo:\\n- vai_pensar\\n- achou_caro\\n- avaliacao_baixa\\n- sem_interesse\\n- sumiu');
   if (!motivo) return;
   const dias = prompt('Em quantos dias?');
   if (!dias) return;
-  await fetch(API + '/painel/followup', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: telefone, motivo, dias: parseInt(dias) })
-  });
+  await fetch(API + '/painel/followup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ from: telefone, motivo, dias: parseInt(dias) }) });
   alert('✅ Follow-up agendado!');
 }
-
 async function carregarConversas() {
   try {
     const res = await fetch(API + '/painel/conversas');
     const data = await res.json();
     const list = document.getElementById('convList');
-    if (!data.conversas?.length) {
-      list.innerHTML = '<div class="loading-txt">Nenhuma conversa</div>';
-      document.getElementById('statusText').textContent = 'Sem conversas';
-      return;
-    }
+    if (!data.conversas?.length) { list.innerHTML = '<div class="loading-txt">Nenhuma conversa</div>'; document.getElementById('statusText').textContent = 'Sem conversas'; return; }
     list.innerHTML = data.conversas.map(c =>
       \`<div class="conv-item \${c.from === conversaAtiva ? 'active' : c.naoLida > 0 ? 'unread' : ''}" onclick="abrirConversa('\${c.from}')">
         <div class="conv-phone">\${formatarTelefone(c.from)}\${c.naoLida > 0 ? \`<span class="conv-badge">\${c.naoLida}</span>\` : ''}</div>
@@ -1147,36 +1091,22 @@ async function carregarConversas() {
     document.getElementById('statusText').textContent = data.conversas.length + ' conversa(s)';
   } catch(e) { document.getElementById('statusText').textContent = 'Erro de conexão'; }
 }
-
 async function abrirConversa(from) {
   conversaAtiva = from;
   document.getElementById('chatPhone').textContent = formatarTelefone(from);
   document.getElementById('chatActions').style.display = 'flex';
   document.getElementById('interventionArea').style.display = 'block';
-
-  await fetch(API + '/painel/visualizar', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from })
-  });
-
-  // Busca estágio do cliente
+  await fetch(API + '/painel/visualizar', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ from }) });
   try {
     const res = await fetch(API + '/crm');
     const data = await res.json();
     let estagio = null;
-    Object.entries(data).forEach(([key, cards]) => {
-      if (cards.some(c => c.telefone === from)) estagio = key;
-    });
-    if (estagio && ESTAGIOS[estagio]) {
-      document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
-    }
+    Object.entries(data).forEach(([key, cards]) => { if (cards.some(c => c.telefone === from)) estagio = key; });
+    if (estagio && ESTAGIOS[estagio]) document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
   } catch(e) {}
-
   await carregarMensagens(from);
   await carregarConversas();
 }
-
 async function carregarMensagens(from) {
   try {
     const res = await fetch(API + '/painel/mensagens/' + from);
@@ -1193,74 +1123,44 @@ async function carregarMensagens(from) {
     msgs.scrollTop = msgs.scrollHeight;
   } catch(e) {}
 }
-
 async function enviarIntervencao() {
   if (!conversaAtiva) return;
   const texto = document.getElementById('interventionText').value.trim();
   if (!texto) return;
-  const res = await fetch(API + '/painel/intervencao', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva, texto })
-  });
+  const res = await fetch(API + '/painel/intervencao', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ from: conversaAtiva, texto }) });
   if (res.ok) { document.getElementById('interventionText').value = ''; await carregarMensagens(conversaAtiva); }
 }
-
-function abrirModalMover() {
-  if (!conversaAtiva) return;
-  document.getElementById('modalMover').classList.add('open');
-}
-
-function fecharModal() {
-  document.getElementById('modalMover').classList.remove('open');
-}
-
+function abrirModalMover() { if (!conversaAtiva) return; document.getElementById('modalMover').classList.add('open'); }
+function fecharModal() { document.getElementById('modalMover').classList.remove('open'); }
 async function moverLead(estagio) {
   if (!conversaAtiva) return;
-  await fetch(API + '/crm/mover', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ telefone: conversaAtiva, estagio })
-  });
+  await fetch(API + '/crm/mover', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ telefone: conversaAtiva, estagio }) });
   fecharModal();
-  if (ESTAGIOS[estagio]) {
-    document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
-  }
+  if (ESTAGIOS[estagio]) document.getElementById('chatEstagio').innerHTML = \`<span class="estagio-tag \${ESTAGIOS[estagio].classe}">\${ESTAGIOS[estagio].label}</span>\`;
   await carregarKanban();
-  alert('✅ Lead movido para ' + ESTAGIOS[estagio]?.label);
 }
-
 async function agendarFollowUpManual() {
   if (!conversaAtiva) return;
   const motivo = prompt('Motivo:\\n- vai_pensar (1d)\\n- achou_caro (3d)\\n- avaliacao_baixa (5d)\\n- sem_interesse (7d)\\n- sumiu (5d)');
   if (!motivo) return;
   const dias = prompt('Em quantos dias enviar?');
   if (!dias) return;
-  await fetch(API + '/painel/followup', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) })
-  });
+  await fetch(API + '/painel/followup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ from: conversaAtiva, motivo, dias: parseInt(dias) }) });
   alert('✅ Follow-up agendado!');
 }
-
 async function abrirAprendizado() {
   if (!conversaAtiva) return;
   const situacao = prompt('Descreva a situação:');
   if (!situacao) return;
   const correcao = prompt('Como a Sarah deveria responder?');
   if (!correcao) return;
-  await fetch(API + '/painel/aprendizado', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ situacao, correcao })
-  });
+  await fetch(API + '/painel/aprendizado', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ situacao, correcao }) });
   alert('✅ Aprendizado salvo!');
 }
-
 async function marcarResolvido() {
   if (!conversaAtiva) return;
-  if (!confirm('Marcar conversa como resolvida?')) return;
-  await fetch(API + '/painel/resolver', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ from: conversaAtiva })
-  });
+  if (!confirm('Marcar como resolvido?')) return;
+  await fetch(API + '/painel/resolver', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ from: conversaAtiva }) });
   conversaAtiva = null;
   document.getElementById('chatPhone').textContent = 'Selecione uma conversa';
   document.getElementById('chatEstagio').innerHTML = '';
@@ -1269,23 +1169,16 @@ async function marcarResolvido() {
   document.getElementById('messages').innerHTML = '<div class="empty-state">Selecione uma conversa</div>';
   await carregarConversas();
 }
-
 document.getElementById('interventionText').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarIntervencao(); }
 });
-
 document.getElementById('modalMover').addEventListener('click', e => {
   if (e.target === document.getElementById('modalMover')) fecharModal();
 });
-
 async function atualizar() {
   if (viewAtiva === 'kanban') await carregarKanban();
-  if (viewAtiva === 'chat') {
-    await carregarConversas();
-    if (conversaAtiva) await carregarMensagens(conversaAtiva);
-  }
+  if (viewAtiva === 'chat') { await carregarConversas(); if (conversaAtiva) await carregarMensagens(conversaAtiva); }
 }
-
 carregarKanban();
 setInterval(atualizar, 8000);
 </script>
@@ -1296,21 +1189,16 @@ setInterval(atualizar, 8000);
 });
 
 app.get("/painel/conversas", async (req, res) => {
-  try { res.json({ conversas: await listarConversas() }); }
-  catch (e) { res.json({ conversas: [] }); }
+  try { res.json({ conversas: await listarConversas() }); } catch (e) { res.json({ conversas: [] }); }
 });
-
 app.get("/painel/mensagens/:from", async (req, res) => {
-  try { res.json({ mensagens: await buscarMensagens(req.params.from) }); }
-  catch (e) { res.json({ mensagens: [] }); }
+  try { res.json({ mensagens: await buscarMensagens(req.params.from) }); } catch (e) { res.json({ mensagens: [] }); }
 });
-
 app.post("/painel/visualizar", (req, res) => {
   const { from } = req.body;
   if (from) conversasVisualizadas[from] = Date.now();
   res.json({ ok: true });
 });
-
 app.post("/painel/intervencao", async (req, res) => {
   const { from, texto } = req.body;
   if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
@@ -1325,26 +1213,21 @@ app.post("/painel/intervencao", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ erro: e.message }); }
 });
-
 app.post("/painel/aprendizado", async (req, res) => {
   const { situacao, correcao } = req.body;
   if (!situacao || !correcao) return res.status(400).json({ erro: "Dados inválidos" });
   try { await salvarAprendizado(situacao, correcao); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ erro: e.message }); }
 });
-
 app.get("/painel/aprendizados", async (req, res) => {
-  try { res.json({ aprendizados: await buscarAprendizados() }); }
-  catch (e) { res.json({ aprendizados: [] }); }
+  try { res.json({ aprendizados: await buscarAprendizados() }); } catch (e) { res.json({ aprendizados: [] }); }
 });
-
 app.post("/painel/followup", async (req, res) => {
   const { from, motivo, dias } = req.body;
   if (!from || !motivo || !dias) return res.status(400).json({ erro: "Dados inválidos" });
   try { await agendarFollowUp(from, motivo, null, dias); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ erro: e.message }); }
 });
-
 app.post("/painel/resolver", async (req, res) => {
   const { from } = req.body;
   if (conversas[from]) delete conversas[from];
