@@ -63,6 +63,20 @@ const ultimaMensagemCliente = {};
 // Guarda apenas UM por vez (o mais recente)
 let descontoPendente = null;
 
+// Fila de processamento por telefone — evita race condition quando
+// o cliente manda 2+ mensagens em sequência rápida
+const filaProcessamento = {};
+
+async function processarMensagemNaFila(from, text) {
+  // Se já existe processamento em andamento para esse número, encadeia
+  const anterior = filaProcessamento[from] || Promise.resolve();
+  const atual = anterior
+    .catch(() => {}) // não deixa erro anterior travar a fila
+    .then(() => processarMensagem(from, text));
+  filaProcessamento[from] = atual;
+  return atual;
+}
+
 // ─────────────────────────────────────────────
 // CACHE DE APRENDIZADOS
 // ─────────────────────────────────────────────
@@ -142,7 +156,49 @@ function detectarPedidoDesconto(texto) {
   return (temFrase && temValor) || temPropostaDireta || temOferta || /em [5-9]\d/.test(t);
 }
 
+// ─────────────────────────────────────────────
+// PERSISTÊNCIA DO DESCONTO PENDENTE (sobrevive a reinícios)
+// ─────────────────────────────────────────────
+
+async function salvarDescontoPendente(telefone, info) {
+  descontoPendente = { telefone, info, timestamp: Date.now() };
+  try {
+    await supabase.from("descontos_pendentes").delete().neq("telefone", "");
+    await supabase.from("descontos_pendentes").insert({ telefone, info: JSON.stringify(info) });
+  } catch (e) {
+    console.error("[Desconto] Erro ao persistir (tabela pode não existir ainda):", e.message);
+  }
+}
+
+async function limparDescontoPendente() {
+  descontoPendente = null;
+  try {
+    await supabase.from("descontos_pendentes").delete().neq("telefone", "");
+  } catch (e) {
+    console.error("[Desconto] Erro ao limpar persistência:", e.message);
+  }
+}
+
+async function carregarDescontoPendente() {
+  if (descontoPendente) return descontoPendente;
+  try {
+    const { data } = await supabase.from("descontos_pendentes").select("*").limit(1);
+    if (data && data.length > 0) {
+      descontoPendente = {
+        telefone: data[0].telefone,
+        info: typeof data[0].info === "string" ? JSON.parse(data[0].info) : data[0].info,
+        timestamp: new Date(data[0].criado_em || Date.now()).getTime()
+      };
+      console.log(`[Desconto] Recuperado da persistência: ${descontoPendente.telefone}`);
+    }
+  } catch (e) {
+    // Tabela pode não existir ainda — não é crítico
+  }
+  return descontoPendente;
+}
+
 async function processarDesconto(from, texto, historicoConversa) {
+  await carregarDescontoPendente();
   // Se já tem desconto pendente para ESTE cliente, não dispara novamente
   if (descontoPendente && descontoPendente.telefone === from) return false;
   if (!detectarPedidoDesconto(texto)) return false;
@@ -169,8 +225,8 @@ Texto atual: "${texto}"`
     const jsonMatch = res.data.content[0].text.trim().match(/\{[\s\S]+\}/);
     const info = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
 
-    // Guarda o desconto pendente
-    descontoPendente = { telefone: from, info, timestamp: Date.now() };
+    // Guarda o desconto pendente — agora persistido no Supabase também
+    await salvarDescontoPendente(from, info);
 
     // Notifica consultor
     const numero = from.replace(/\D/g, "");
@@ -713,10 +769,13 @@ ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNa
 3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
 4. Só ofereça alternativas se tiver algo REALMENTE similar` : ""}
 
-${descontoPendenteAtivo ? `⚠️ DESCONTO PENDENTE: Há um pedido de desconto aguardando retorno do nosso consultor.
+${descontoPendenteAtivo ? `🚨 DESCONTO PENDENTE — REGRA CRÍTICA E ABSOLUTA:
+Há um pedido de desconto aguardando retorno do nosso consultor. Ele AINDA NÃO RESPONDEU.
 - Se o cliente perguntar sobre o desconto: "Ainda não tive retorno do nosso consultor, mas assim que confirmar te aviso! 😊"
 - Continue atendendo normalmente sobre outros assuntos (fotos, financiamento, visita, etc.)
-- NUNCA diga que o desconto foi aprovado ou negado sem confirmação` : ""}
+- JAMAIS invente, afirme ou sugira que o desconto foi aprovado, negado ou que chegou a um valor específico. Isso só pode vir de uma instrução explícita do sistema confirmando a decisão real.
+- Você NÃO TEM autoridade para fechar nenhum valor diferente do preço de tabela enquanto este aviso estiver ativo.` : `
+🚨 REGRA CRÍTICA DE DESCONTOS: Você NUNCA pode confirmar, inventar ou sugerir que um desconto foi aprovado por conta própria. Qualquer valor abaixo do preço de tabela só pode ser comunicado se vier explicitamente de uma instrução do sistema dizendo "nosso consultor autorizou". Sem essa instrução explícita, sempre cite o preço cheio do estoque.`}
 
 FOTOS: Quando o sistema confirmar [fotos enviadas], diga: "Mandei as fotos! O que achou? 😊". NUNCA diga que enviou fotos sem essa confirmação. NUNCA use tags XML.
 
@@ -755,6 +814,8 @@ async function processarComandoConsultor(from, text) {
   if (!ehConsultor(from)) return false;
   const t = text.trim().toUpperCase();
 
+  await carregarDescontoPendente();
+
   // Comando PENDENCIAS
   if (t === "PENDENCIAS") {
     const msg = descontoPendente
@@ -788,8 +849,8 @@ async function processarComandoConsultor(from, text) {
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
   );
 
-  // Limpa desconto pendente
-  descontoPendente = null;
+  // Limpa desconto pendente (memória + persistência)
+  await limparDescontoPendente();
 
   // Retoma conversa com o cliente
   const msgSistema = autorizado
@@ -864,6 +925,7 @@ async function processarMensagem(from, text) {
   detectarEstagio(from, text, conversas[from]).catch(() => {});
 
   // Verifica pedido de desconto — só dispara se não há pendente para este cliente
+  await carregarDescontoPendente();
   const clienteTemDescontoPendente = descontoPendente && descontoPendente.telefone === from;
   if (!clienteTemDescontoPendente) {
     const ehDesconto = await processarDesconto(from, text, conversas[from]);
@@ -948,7 +1010,7 @@ async function processarFotosAgrupadas(from, analises) {
   const texto = analises.length === 1
     ? `[Cliente enviou foto. Análise: ${analises[0]}]`
     : `[Cliente enviou ${analises.length} fotos. Análises:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
-  await processarMensagem(from, texto);
+  await processarMensagemNaFila(from, texto);
 }
 
 // ─────────────────────────────────────────────
@@ -1011,10 +1073,10 @@ app.post("/webhook", async (req, res) => {
         const text = msg.text?.body;
         if (!text) return;
         console.log(`Texto de ${from}: ${text}`);
-        await processarMensagem(from, text);
+        await processarMensagemNaFila(from, text);
       } else if (msg.type === "audio") {
         const texto = await transcreverAudio(msg.audio.id);
-        if (texto) await processarMensagem(from, `[Áudio]: ${texto}`);
+        if (texto) await processarMensagemNaFila(from, `[Áudio]: ${texto}`);
         else await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
           { messaging_product: "whatsapp", to: from, text: { body: "Não consegui entender o áudio. Pode digitar?" } },
           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
@@ -1031,7 +1093,7 @@ app.post("/webhook", async (req, res) => {
           const analises = [...filaFotos[from].analises];
           delete filaFotos[from];
           if (analises.length > 0) await processarFotosAgrupadas(from, analises);
-          else await processarMensagem(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
+          else await processarMensagemNaFila(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
         }, 3000);
       }
     } catch (e) {
