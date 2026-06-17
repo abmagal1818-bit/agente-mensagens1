@@ -59,6 +59,10 @@ const ultimaNotificacao = {};
 const conversasVisualizadas = {};
 const ultimaMensagemCliente = {};
 
+// Estado de coleta de dados para simulação de crédito
+// { telefone: { etapa: 'nome'|'cpf'|'nascimento'|'completo', nome, cpf, nascimento } }
+const coletaCredito = {};
+
 // Desconto pendente: { telefone, info, timestamp }
 // Guarda apenas UM por vez (o mais recente)
 let descontoPendente = null;
@@ -127,6 +131,101 @@ function ehMensagemSimples(texto) {
     "tá", "ta", "tá bom", "ta bom", "pode ser", "claro", "perfeito", "ótimo", "otimo",
     "entendi", "entendido", "combinado", "até", "ate", "tchau", "abraço", "abs"];
   return simples.includes(t) || t.length < 8;
+}
+
+// ─────────────────────────────────────────────
+// SIMULAÇÃO DE CRÉDITO — COLETA DE DADOS
+// ─────────────────────────────────────────────
+
+function detectarInteresseFinanciamento(texto, historicoConversa) {
+  const t = texto.toLowerCase();
+  // Não dispara se já está no meio de uma coleta
+  const frases = [
+    "preciso financiar", "quero financiar", "consigo financiar",
+    "tenho crédito", "tenho credito", "será que consigo crédito",
+    "será que consigo credito", "consigo parcelar", "vai dar pra financiar",
+    "tem como financiar", "tem credito", "tem crédito",
+    "fazer financiamento", "simular financiamento", "simular crédito",
+    "simular credito", "ver se aprova", "ver se passa", "análise de crédito",
+    "analise de credito", "consultar meu nome", "consultar meu cpf"
+  ];
+  return frases.some(f => t.includes(f));
+}
+
+function validarCPF(cpfTexto) {
+  const cpf = String(cpfTexto).replace(/\D/g, "");
+  if (cpf.length !== 11) return null;
+  if (/^(\d)\1{10}$/.test(cpf)) return null; // todos dígitos iguais
+  // Validação dos dígitos verificadores
+  let soma = 0;
+  for (let i = 0; i < 9; i++) soma += parseInt(cpf[i]) * (10 - i);
+  let resto = (soma * 10) % 11;
+  if (resto === 10 || resto === 11) resto = 0;
+  if (resto !== parseInt(cpf[9])) return null;
+  soma = 0;
+  for (let i = 0; i < 10; i++) soma += parseInt(cpf[i]) * (11 - i);
+  resto = (soma * 10) % 11;
+  if (resto === 10 || resto === 11) resto = 0;
+  if (resto !== parseInt(cpf[10])) return null;
+  return cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
+}
+
+function extrairDataNascimento(texto) {
+  // Aceita formatos: 01/01/1990, 01-01-1990, 1 de janeiro de 1990, etc.
+  const matchBarra = texto.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (matchBarra) {
+    let [, dia, mes, ano] = matchBarra;
+    if (ano.length === 2) ano = (parseInt(ano) > 30 ? "19" : "20") + ano;
+    dia = dia.padStart(2, "0");
+    mes = mes.padStart(2, "0");
+    return `${dia}/${mes}/${ano}`;
+  }
+  return null;
+}
+
+async function notificarDadosCredito(telefone, dados) {
+  const numero = telefone.replace(/\D/g, "");
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : telefone;
+  const msg = `📋 *Simulação de crédito solicitada*
+Cliente: ${formatado}
+Nome: *${dados.nome}*
+CPF: *${dados.cpf}*
+Nascimento: *${dados.nascimento}*
+${dados.veiculo ? `Veículo de interesse: *${dados.veiculo}*` : "Veículo de interesse: não identificado"}
+${dados.entrada ? `Valor de entrada: *${dados.entrada}*` : "Entrada: à combinar"}
+
+Faça a simulação nas financeiras e responda:
+✅ *SIMULACAO ${telefone} [resultado]* — ex: SIMULACAO ${telefone} Aprovado BV, parcela R$ 1.250 em 48x`;
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: msg } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[Crédito] ✅ Consultor notificado sobre dados de ${telefone}`);
+  } catch (e) { console.error("[Crédito] Erro notificação:", e.message); }
+}
+
+async function salvarSimulacaoCredito(telefone, dados) {
+  try {
+    await supabase.from("simulacoes_credito").insert({
+      telefone, nome: dados.nome, cpf: dados.cpf, nascimento: dados.nascimento,
+      veiculo: dados.veiculo || null, entrada: dados.entrada || null, status: "pendente"
+    });
+    console.log(`[Crédito] ✅ Salvo no Supabase: ${telefone}`);
+  } catch (e) {
+    console.error("[Crédito] Erro ao salvar (tabela pode não existir ainda):", e.message);
+  }
+}
+
+async function atualizarStatusSimulacao(telefone, resultado) {
+  try {
+    await supabase.from("simulacoes_credito")
+      .update({ status: "respondido", resultado })
+      .eq("telefone", telefone)
+      .eq("status", "pendente");
+  } catch (e) {
+    console.error("[Crédito] Erro ao atualizar status:", e.message);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -865,6 +964,53 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
+  // Comando SIMULACAO [telefone] [resultado] — responde resultado de crédito ao cliente
+  const matchSimulacao = text.match(/^SIMULA[CÇ][AÃ]O\s+(\d{10,13})\s+([\s\S]+)/i);
+  if (matchSimulacao) {
+    const telefoneCliente = matchSimulacao[1];
+    const resultado = matchSimulacao[2].trim();
+
+    await atualizarStatusSimulacao(telefoneCliente, resultado);
+
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: `✅ Resultado enviado para ${telefoneCliente}` } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+
+    if (!conversas[telefoneCliente]) {
+      const msgs = await buscarMensagens(telefoneCliente);
+      conversas[telefoneCliente] = msgs.slice(-20).map(m => ({
+        role: m.tipo === "client" ? "user" : "assistant",
+        content: m.texto || ""
+      }));
+    }
+
+    const msgSistema = `[Sistema: resultado da simulação de crédito chegou: "${resultado}". Informe ao cliente de forma natural e entusiasta (se aprovado) ou acolhedora (se negado), sem citar nomes da equipe. Convide para vir à loja fechar o negócio se aprovado.]`;
+    conversas[telefoneCliente].push({ role: "user", content: msgSistema });
+
+    const aprendizadosExtraSim = await obterAprendizados();
+    const claudeSim = await axios.post("https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 500,
+        system: SYSTEM_PROMPT(null, aprendizadosExtraSim, null, false),
+        messages: conversas[telefoneCliente]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+
+    const replySim = claudeSim.data.content[0].text;
+    conversas[telefoneCliente].push({ role: "assistant", content: replySim });
+
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: telefoneCliente, text: { body: replySim } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    await salvarMensagem(telefoneCliente, "sara", replySim);
+    console.log(`[Crédito] ✅ Resultado enviado para ${telefoneCliente}`);
+    return true;
+  }
+
   // AUTORIZO ou NEGO (sem número — usa o desconto pendente)
   const autorizado = t === "AUTORIZO" || t.startsWith("AUTORIZO ");
   const negado = t === "NEGO" || t.startsWith("NEGO ");
@@ -960,6 +1106,133 @@ async function processarMensagem(from, text) {
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
   detectarEstagio(from, text, conversas[from]).catch(() => {});
+
+  // ───── COLETA DE DADOS PARA SIMULAÇÃO DE CRÉDITO ─────
+  // Se já está no meio de uma coleta, processa a etapa atual
+  if (coletaCredito[from]) {
+    const estado = coletaCredito[from];
+
+    if (estado.etapa === "nome") {
+      const nomeDigitado = text.trim();
+      if (nomeDigitado.split(/\s+/).length >= 2 && nomeDigitado.length >= 5) {
+        estado.nome = nomeDigitado;
+        estado.etapa = "cpf";
+        const msg = "Perfeito! Agora me passa seu CPF, por favor (só os números) 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      } else {
+        const msg = "Pode me mandar seu nome completo, por favor? 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      }
+    }
+
+    if (estado.etapa === "cpf") {
+      const cpfValido = validarCPF(text);
+      if (cpfValido) {
+        estado.cpf = cpfValido;
+        estado.etapa = "nascimento";
+        const msg = "Show! Agora sua data de nascimento (dia/mês/ano) 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      } else {
+        const msg = "Esse CPF não parece válido. Pode conferir e mandar de novo? (só os números, 11 dígitos) 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      }
+    }
+
+    if (estado.etapa === "nascimento") {
+      const dataNasc = extrairDataNascimento(text);
+      if (dataNasc) {
+        estado.nascimento = dataNasc;
+        estado.etapa = "entrada";
+        const msg = "Combinado! Última coisa: você pretende dar algum valor de entrada? Se sim, me diz quanto 😊 (se não tiver entrada, é só dizer)";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      } else {
+        const msg = "Não consegui entender a data. Pode mandar no formato dia/mês/ano? Ex: 15/03/1990 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      }
+    }
+
+    if (estado.etapa === "entrada") {
+      // Aceita valor em texto livre — "sem entrada", "não", "5 mil", "R$ 10.000", etc.
+      const tEntrada = text.toLowerCase().trim();
+      const semEntrada = ["não", "nao", "sem entrada", "n", "0", "nenhuma", "não tenho", "nao tenho"];
+      const entradaValor = semEntrada.some(p => tEntrada === p || tEntrada.includes(p)) ? "Sem entrada" : text.trim();
+
+      estado.entrada = entradaValor;
+
+      // Tenta identificar o veículo de interesse a partir de todo o histórico da conversa
+      const veiculoInteresse = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+      const nomeVeiculo = veiculoInteresse ? `${limparTexto(veiculoInteresse.modelo)} ${veiculoInteresse.ano || ""}`.trim() : null;
+
+      // Coleta completa — notifica e salva
+      const dadosFinais = {
+        nome: estado.nome, cpf: estado.cpf, nascimento: estado.nascimento,
+        entrada: estado.entrada, veiculo: nomeVeiculo
+      };
+      delete coletaCredito[from];
+
+      await notificarDadosCredito(from, dadosFinais);
+      await salvarSimulacaoCredito(from, dadosFinais);
+      await atualizarEstagio(from, "negociacao", nomeVeiculo);
+
+      const msg = `Perfeito, ${dadosFinais.nome.split(" ")[0]}! Já encaminhei seus dados pra nossa equipe fazer a simulação nas financeiras. Assim que tiver o resultado, te aviso aqui! 😊`;
+      conversas[from].push({ role: "assistant", content: msg });
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: from, text: { body: msg } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await salvarMensagem(from, "sara", msg);
+      return;
+    }
+  }
+
+  // Detecta início de interesse em financiamento — inicia coleta
+  if (!coletaCredito[from] && detectarInteresseFinanciamento(text, conversas[from])) {
+    coletaCredito[from] = { etapa: "nome" };
+    const msg = "Posso fazer uma simulação de crédito pra você! 😊 Pra isso preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?";
+    conversas[from].push({ role: "assistant", content: msg });
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: from, text: { body: msg } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    await salvarMensagem(from, "sara", msg);
+    return;
+  }
 
   // Verifica pedido de desconto — só dispara se não há pendente para este cliente
   await carregarDescontoPendente();
@@ -1428,6 +1701,12 @@ app.post("/painel/aprendizado", async (req, res) => {
 });
 app.get("/painel/aprendizados", async (req, res) => {
   try { res.json({ aprendizados: await buscarAprendizados() }); } catch (e) { res.json({ aprendizados: [] }); }
+});
+app.get("/painel/simulacoes", async (req, res) => {
+  try {
+    const { data } = await supabase.from("simulacoes_credito").select("*").order("criado_em", { ascending: false }).limit(50);
+    res.json({ simulacoes: data || [] });
+  } catch (e) { res.json({ simulacoes: [] }); }
 });
 app.post("/painel/followup", async (req, res) => {
   const { from, motivo, dias } = req.body;
