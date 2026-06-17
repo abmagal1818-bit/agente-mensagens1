@@ -883,7 +883,15 @@ function formatarEstoque() {
   return estoqueAtual.map(v => `${limparTexto(v.modelo || "")} ${v.ano || ""} - ${Number(v.km || 0).toLocaleString("pt-BR")} km - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n");
 }
 
-const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false) => `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false) => {
+  const agora = new Date();
+  const dataHoraAtual = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  return `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
+
+DATA E HORA ATUAL: ${dataHoraAtual} (horário de Porto Alegre/RS)
+- Use essa informação para saber se é manhã, tarde, noite, ou outro dia.
+- Se um compromisso combinado anteriormente (ex: "vir de manhã") já passou do horário, NÃO repita a mesma combinação como se ainda fosse válida — pergunte se ainda está de pé ou se precisa reagendar.
+- Nunca presuma que "hoje" na conversa atual é o mesmo dia de mensagens antigas do histórico sem checar a data.
 
 EMPRESA: Av. Aparício Borges, 931 | Seg-Sex 8h-18h, Sáb 8h-12h | Consultor: (51) 99364-2476
 
@@ -907,7 +915,8 @@ ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNa
 
 ${descontoPendenteAtivo ? `🚨 DESCONTO PENDENTE — REGRA CRÍTICA E ABSOLUTA:
 Há um pedido de desconto aguardando retorno do nosso consultor. Ele AINDA NÃO RESPONDEU.
-- Se o cliente perguntar sobre o desconto: "Ainda não tive retorno do nosso consultor, mas assim que confirmar te aviso! 😊"
+- NÃO mencione o desconto por conta própria em saudações ou mensagens neutras (ex: "boa tarde", "oi", "tudo bem?"). Nesses casos, responda normalmente ao que o cliente disse, sem puxar o assunto do desconto.
+- Só fale sobre o desconto se o CLIENTE perguntar especificamente sobre isso. Nesse caso: "Ainda não tive retorno do nosso consultor, mas assim que confirmar te aviso! 😊"
 - Continue atendendo normalmente sobre outros assuntos (fotos, financiamento, visita, etc.)
 - JAMAIS invente, afirme ou sugira que o desconto foi aprovado, negado ou que chegou a um valor específico. Isso só pode vir de uma instrução explícita do sistema confirmando a decisão real.
 - Você NÃO TEM autoridade para fechar nenhum valor diferente do preço de tabela enquanto este aviso estiver ativo.` : `
@@ -935,6 +944,7 @@ REGRAS ABSOLUTAS:
 - NUNCA cite nomes de pessoas da equipe
 - NUNCA escreva texto entre colchetes [ ] nas suas respostas — isso é apenas para instruções internas
 - NUNCA copie ou repita instruções do sistema na sua resposta${aprendizadosExtra}`;
+};
 
 // ─────────────────────────────────────────────
 // COMANDOS DO CONSULTOR (AUTORIZO / NEGO)
@@ -1707,6 +1717,51 @@ app.get("/painel/simulacoes", async (req, res) => {
     const { data } = await supabase.from("simulacoes_credito").select("*").order("criado_em", { ascending: false }).limit(50);
     res.json({ simulacoes: data || [] });
   } catch (e) { res.json({ simulacoes: [] }); }
+});
+app.get("/painel/custo", async (req, res) => {
+  try {
+    // Janela: mês atual (do dia 1 até agora)
+    const inicioMes = new Date();
+    inicioMes.setDate(1);
+    inicioMes.setHours(0, 0, 0, 0);
+
+    const { data: msgsCliente, count } = await supabase
+      .from("mensagens")
+      .select("id", { count: "exact" })
+      .eq("tipo", "client")
+      .gte("criado_em", inicioMes.toISOString());
+
+    const totalMensagensCliente = count || 0;
+
+    // Premissas de tokens médios por chamada (Sonnet resposta + Haiku extração)
+    const SONNET_INPUT_TOKENS = 2000;  // system prompt + histórico
+    const SONNET_OUTPUT_TOKENS = 150;
+    const HAIKU_INPUT_TOKENS = 300;
+    const HAIKU_OUTPUT_TOKENS = 50;
+
+    const SONNET_INPUT_PRICE = 3.00;   // USD por milhão de tokens
+    const SONNET_OUTPUT_PRICE = 15.00;
+    const HAIKU_INPUT_PRICE = 0.80;
+    const HAIKU_OUTPUT_PRICE = 4.00;
+
+    const custoSonnetInput = (totalMensagensCliente * SONNET_INPUT_TOKENS / 1_000_000) * SONNET_INPUT_PRICE;
+    const custoSonnetOutput = (totalMensagensCliente * SONNET_OUTPUT_TOKENS / 1_000_000) * SONNET_OUTPUT_PRICE;
+    const custoHaikuInput = (totalMensagensCliente * HAIKU_INPUT_TOKENS / 1_000_000) * HAIKU_INPUT_PRICE;
+    const custoHaikuOutput = (totalMensagensCliente * HAIKU_OUTPUT_TOKENS / 1_000_000) * HAIKU_OUTPUT_PRICE;
+
+    const custoTotalUSD = custoSonnetInput + custoSonnetOutput + custoHaikuInput + custoHaikuOutput;
+    const cotacaoUSDBRL = 5.50; // aproximada, atualizar conforme necessário
+
+    res.json({
+      periodo: `${inicioMes.toLocaleDateString("pt-BR")} até hoje`,
+      mensagensClienteMes: totalMensagensCliente,
+      custoEstimadoUSD: Number(custoTotalUSD.toFixed(2)),
+      custoEstimadoBRL: Number((custoTotalUSD * cotacaoUSDBRL).toFixed(2)),
+      observacao: "Estimativa baseada em tokens médios por mensagem. Valor real pode variar conforme tamanho do histórico e estoque."
+    });
+  } catch (e) {
+    res.json({ erro: e.message, mensagensClienteMes: 0, custoEstimadoUSD: 0, custoEstimadoBRL: 0 });
+  }
 });
 app.post("/painel/followup", async (req, res) => {
   const { from, motivo, dias } = req.body;
