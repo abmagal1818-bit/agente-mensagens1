@@ -1262,9 +1262,20 @@ async function processarMensagem(from, text) {
 
       estado.entrada = entradaValor;
 
-      // Tenta identificar o veículo de interesse a partir de todo o histórico da conversa
-      const veiculoInteresse = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-      const nomeVeiculo = veiculoInteresse ? `${limparTexto(veiculoInteresse.modelo)} ${veiculoInteresse.ano || ""}`.trim() : null;
+      // Prioriza o veículo já registrado no CRM (mais confiável — reflete
+      // o histórico real de interesse, ex: quando fotos foram enviadas).
+      // Só cai pra busca textual no histórico recente como fallback.
+      let nomeVeiculo = null;
+      try {
+        const { data: clienteData } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", from).limit(1);
+        if (clienteData?.[0]?.veiculo_interesse) nomeVeiculo = clienteData[0].veiculo_interesse;
+      } catch (e) {
+        // segue pro fallback
+      }
+      if (!nomeVeiculo) {
+        const veiculoInteresse = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+        nomeVeiculo = veiculoInteresse ? `${limparTexto(veiculoInteresse.modelo)} ${veiculoInteresse.ano || ""}`.trim() : null;
+      }
 
       // Coleta completa — notifica e salva
       const dadosFinais = {
