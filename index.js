@@ -171,15 +171,43 @@ function validarCPF(cpfTexto) {
 }
 
 function extrairDataNascimento(texto) {
-  // Aceita formatos: 01/01/1990, 01-01-1990, 1 de janeiro de 1990, etc.
-  const matchBarra = texto.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (matchBarra) {
-    let [, dia, mes, ano] = matchBarra;
+  const t = texto.trim();
+
+  // Formato com separador: 01/01/1990, 01-01-1990, 01 01 1990
+  const matchSeparado = t.match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/);
+  if (matchSeparado) {
+    let [, dia, mes, ano] = matchSeparado;
     if (ano.length === 2) ano = (parseInt(ano) > 30 ? "19" : "20") + ano;
     dia = dia.padStart(2, "0");
     mes = mes.padStart(2, "0");
-    return `${dia}/${mes}/${ano}`;
+    const diaN = parseInt(dia), mesN = parseInt(mes), anoN = parseInt(ano);
+    if (diaN >= 1 && diaN <= 31 && mesN >= 1 && mesN <= 12 && anoN >= 1900 && anoN <= new Date().getFullYear()) {
+      return `${dia}/${mes}/${ano}`;
+    }
   }
+
+  // Formato colado sem separador: DDMMYYYY (8 dígitos) ou DDMMAA (6 dígitos)
+  const apenasDigitos = t.replace(/\D/g, "");
+  if (apenasDigitos.length === 8) {
+    const dia = apenasDigitos.slice(0, 2);
+    const mes = apenasDigitos.slice(2, 4);
+    const ano = apenasDigitos.slice(4, 8);
+    const diaN = parseInt(dia), mesN = parseInt(mes), anoN = parseInt(ano);
+    if (diaN >= 1 && diaN <= 31 && mesN >= 1 && mesN <= 12 && anoN >= 1900 && anoN <= new Date().getFullYear()) {
+      return `${dia}/${mes}/${ano}`;
+    }
+  }
+  if (apenasDigitos.length === 6) {
+    const dia = apenasDigitos.slice(0, 2);
+    const mes = apenasDigitos.slice(2, 4);
+    let ano = apenasDigitos.slice(4, 6);
+    ano = (parseInt(ano) > 30 ? "19" : "20") + ano;
+    const diaN = parseInt(dia), mesN = parseInt(mes), anoN = parseInt(ano);
+    if (diaN >= 1 && diaN <= 31 && mesN >= 1 && mesN <= 12) {
+      return `${dia}/${mes}/${ano}`;
+    }
+  }
+
   return null;
 }
 
@@ -1177,6 +1205,26 @@ async function processarMensagem(from, text) {
       if (dataNasc) {
         estado.nascimento = dataNasc;
         estado.etapa = "entrada";
+
+        // Verifica se um valor de entrada já foi mencionado antes na conversa
+        const historicoTexto = (conversas[from] || []).map(m => m.content || "").join(" \n ");
+        const matchEntradaPrevia = historicoTexto.match(/entrada[^\d]{0,15}(r\$\s*)?([\d.,]+\s*(mil|k)?)/i)
+          || historicoTexto.match(/([\d.,]+\s*(mil|k)?)\s*(de\s*)?entrada/i);
+
+        if (matchEntradaPrevia) {
+          const valorDetectado = matchEntradaPrevia[2] || matchEntradaPrevia[1];
+          const msg = `Combinado! Você já tinha mencionado uma entrada de *${valorDetectado.trim()}* aqui na nossa conversa — é esse mesmo o valor? Pode confirmar ou me dizer o valor certo 😊`;
+          conversas[from].push({ role: "assistant", content: msg });
+          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+            { messaging_product: "whatsapp", to: from, text: { body: msg } },
+            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+          );
+          await salvarMensagem(from, "sara", msg);
+          // Guarda o valor detectado como sugestão — se cliente só confirmar ("sim", "isso"), usamos ele
+          estado.entradaSugerida = valorDetectado.trim();
+          return;
+        }
+
         const msg = "Combinado! Última coisa: você pretende dar algum valor de entrada? Se sim, me diz quanto 😊 (se não tiver entrada, é só dizer)";
         conversas[from].push({ role: "assistant", content: msg });
         await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -1201,7 +1249,16 @@ async function processarMensagem(from, text) {
       // Aceita valor em texto livre — "sem entrada", "não", "5 mil", "R$ 10.000", etc.
       const tEntrada = text.toLowerCase().trim();
       const semEntrada = ["não", "nao", "sem entrada", "n", "0", "nenhuma", "não tenho", "nao tenho"];
-      const entradaValor = semEntrada.some(p => tEntrada === p || tEntrada.includes(p)) ? "Sem entrada" : text.trim();
+      const confirmacoes = ["sim", "isso", "é esse", "e esse", "esse mesmo", "confirmo", "exato", "isso mesmo", "correto"];
+
+      let entradaValor;
+      if (estado.entradaSugerida && confirmacoes.some(p => tEntrada === p || tEntrada.includes(p))) {
+        entradaValor = estado.entradaSugerida;
+      } else if (semEntrada.some(p => tEntrada === p || tEntrada.includes(p))) {
+        entradaValor = "Sem entrada";
+      } else {
+        entradaValor = text.trim();
+      }
 
       estado.entrada = entradaValor;
 
@@ -1220,7 +1277,9 @@ async function processarMensagem(from, text) {
       await salvarSimulacaoCredito(from, dadosFinais);
       await atualizarEstagio(from, "negociacao", nomeVeiculo);
 
-      const msg = `Perfeito, ${dadosFinais.nome.split(" ")[0]}! Já encaminhei seus dados pra nossa equipe fazer a simulação nas financeiras. Assim que tiver o resultado, te aviso aqui! 😊`;
+      const primeiroNome = dadosFinais.nome.split(" ")[0];
+      const primeiroNomeCapitalizado = primeiroNome.charAt(0).toUpperCase() + primeiroNome.slice(1).toLowerCase();
+      const msg = `Perfeito, ${primeiroNomeCapitalizado}! Já encaminhei seus dados pra nossa equipe fazer a simulação nas financeiras. Assim que tiver o resultado, te aviso aqui! 😊`;
       conversas[from].push({ role: "assistant", content: msg });
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to: from, text: { body: msg } },
