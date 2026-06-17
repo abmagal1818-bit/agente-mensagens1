@@ -122,20 +122,24 @@ function ehMensagemSimples(texto) {
 function detectarPedidoDesconto(texto) {
   const t = texto.toLowerCase().trim();
   const frases = [
-    "consegue baixar", "pode baixar", "tem desconto", "dá desconto", "da desconto",
+    "consegue baixar", "pode baixar", "tem desconto", "da desconto",
     "aceita menos", "fecha por menos", "consegue por", "fecha por",
-    "sai por", "aceita", "toparia",
-    "pago à vista", "pago a vista", "pago em dinheiro", "pago no pix",
+    "sai por", "toparia",
+    "pago a vista", "pago em dinheiro", "pago no pix",
     "chegar em", "consegue em", "fecha em", "vai em", "sai em",
     "por menos", "aceita por", "topas por", "consegue chegar",
-    "chega em", "você consegue", "voce consegue", "vc consegue",
+    "chega em", "voce consegue", "vc consegue",
     "tem como chegar", "tem como baixar", "consegue fazer",
-    "daria pra fazer", "daria pra baixar", "dá pra fazer",
-    "da pra fazer", "dá pra baixar", "da pra baixar"
+    "daria pra fazer", "daria pra baixar", "da pra fazer", "da pra baixar",
+    "ofereci", "ofereço", "minha proposta", "proponho",
+    "topam", "topas", "topa", "bora fechar", "fecho por"
   ];
   const temValor = /r\$\s*[\d.,]+|[\d.,]+\s*mil|\d{4,}/.test(t);
   const temFrase = frases.some(f => t.includes(f));
-  return temFrase && (temValor || /em [5-9]\d/.test(t) || /em \d{2,}/.test(t));
+  // Detecta proposta direta: "69 a vista", "70 mil à vista", "ofereci 69"
+  const temPropostaDireta = /\d{2,}\s*(mil|k)?\s*(a|à)\s*vista/i.test(t);
+  const temOferta = /ofereci\s+\d|ofereço\s+\d|proponho\s+\d/.test(t);
+  return (temFrase && temValor) || temPropostaDireta || temOferta || /em [5-9]\d/.test(t);
 }
 
 async function processarDesconto(from, texto, historicoConversa) {
@@ -831,7 +835,25 @@ async function processarMensagem(from, text) {
 
   ultimaMensagemCliente[from] = Date.now();
   const primeiraVez = !ultimaNotificacao[from];
-  if (!conversas[from]) conversas[from] = [];
+
+  // Carregar histórico do Supabase se não tem em memória (após reinício/deploy)
+  if (!conversas[from]) {
+    try {
+      const msgs = await buscarMensagens(from);
+      if (msgs.length > 0) {
+        conversas[from] = msgs.slice(-20).map(m => ({
+          role: m.tipo === "client" ? "user" : "assistant",
+          content: m.texto || ""
+        }));
+        console.log(`[Histórico] Recuperado: ${conversas[from].length} msgs de ${from}`);
+      } else {
+        conversas[from] = [];
+      }
+    } catch (e) {
+      conversas[from] = [];
+    }
+  }
+
   conversas[from].push({ role: "user", content: text });
 
   await salvarMensagem(from, "client", text);
