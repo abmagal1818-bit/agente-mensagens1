@@ -708,16 +708,53 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
 }
 
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
-  const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
-  const ctx = [texto, ...(historicoConversa || []).filter(m => m.role === "user").slice(-8).map(m => m.content)].join(" ").toLowerCase() + " " + ultimaResposta.toLowerCase();
-  let melhorMatch = null, melhorScore = 0;
-  for (const v of estoque) {
+  // Estratégia corrigida: procura o veículo mais RECENTEMENTE mencionado,
+  // olhando as mensagens de trás pra frente (mais novas primeiro).
+  // Isso evita que um carro citado há muitas mensagens atrás "vença" por
+  // coincidência de palavras genéricas (ex: "flex", "automático", "4x4").
+
+  const mensagensRecentes = [
+    { role: "user", content: texto },
+    ...(historicoConversa || []).slice().reverse()
+  ];
+
+  function pontuarVeiculo(v, textoAlvo) {
     const modelo = limparTexto(v.modelo || "").toLowerCase();
-    let score = modelo.split(/\s+/).filter(p => p.length > 2 && ctx.includes(p)).length;
-    if (v.ano && ctx.includes(String(v.ano))) score += 2;
-    if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
+    // Só considera palavras significativas do modelo (>=3 letras, ignora números soltos de versão tipo "1.0")
+    const palavrasModelo = modelo.split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
+    if (!palavrasModelo.length) return 0;
+    let score = palavrasModelo.filter(p => textoAlvo.includes(p)).length;
+    if (v.ano && textoAlvo.includes(String(v.ano))) score += 1;
+    return score;
   }
-  return melhorScore >= 1 ? melhorMatch : null;
+
+  // Passo 1: procura nas mensagens mais recentes primeiro (até 12 mensagens pra trás)
+  for (const msg of mensagensRecentes.slice(0, 12)) {
+    const textoMsg = (msg.content || "").toLowerCase();
+    if (!textoMsg.trim()) continue;
+    let melhorMatch = null, melhorScore = 0;
+    for (const v of estoque) {
+      const score = pontuarVeiculo(v, textoMsg);
+      if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
+    }
+    // Exige pelo menos 2 palavras do modelo batendo, para evitar falso positivo
+    // com modelos de nome curto (ex: "Ka", "Up")
+    if (melhorMatch && melhorScore >= 2) return melhorMatch;
+  }
+
+  // Passo 2: fallback — match de pelo menos 1 palavra forte, ainda na mensagem mais recente que mencionar algo
+  for (const msg of mensagensRecentes.slice(0, 12)) {
+    const textoMsg = (msg.content || "").toLowerCase();
+    if (!textoMsg.trim()) continue;
+    let melhorMatch = null, melhorScore = 0;
+    for (const v of estoque) {
+      const score = pontuarVeiculo(v, textoMsg);
+      if (score > melhorScore) { melhorScore = score; melhorMatch = v; }
+    }
+    if (melhorMatch && melhorScore >= 1) return melhorMatch;
+  }
+
+  return null;
 }
 
 async function enviarFotosVeiculo(to, veiculo) {
