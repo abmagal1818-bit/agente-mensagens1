@@ -1672,7 +1672,7 @@ function aba(id, el) {
 }
 
 function fmt(num) {
-  const n = String(num).replace(/\D/g,'');
+  const n = String(num).replace(/\\D/g,'');
   return n.length >= 12 ? '(' + n.slice(2,4) + ') ' + n.slice(4,9) + '-' + n.slice(9) : num;
 }
 function hora(iso) { return iso ? new Date(iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : ''; }
@@ -1774,7 +1774,7 @@ async function loadMsgs(tel) {
     msgs.innerHTML = data.mensagens.map(m =>
       '<div class="msg ' + m.tipo + '">' +
       '<div class="msg-label">' + (m.tipo==='client'?'👤 Cliente':m.tipo==='sara'?'🤖 Sarah':'⚡ Você') + '</div>' +
-      '<div class="bubble">' + (m.texto||'').replace(/\n/g,'<br>') + '</div>' +
+      '<div class="bubble">' + (m.texto||'').replace(/\\n/g,'<br>') + '</div>' +
       '<div class="msg-hora">' + hora(m.criado_em) + '</div>' +
       '</div>'
     ).join('');
