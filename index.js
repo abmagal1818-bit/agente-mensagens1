@@ -1417,6 +1417,25 @@ app.get("/testar-supabase", async (req, res) => {
     res.json({ ok: true, mensagem: "Supabase conectado!" });
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
+app.get("/diagnostico", async (req, res) => {
+  try {
+    const { data } = await supabase.from("clientes").select("count").limit(1);
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="background:#000;color:#fff;font-family:monospace;padding:20px">
+<h2 style="color:#f0a500">Diagnóstico Sarah CRM</h2>
+<p>Supabase: ✅ OK</p>
+<p id="r">Testando fetch...</p>
+<script>
+fetch('https://agente-mensagens1.onrender.com/crm')
+  .then(r => { document.getElementById('r').textContent = 'Fetch /crm: ✅ HTTP ' + r.status; return r.json(); })
+  .then(d => {
+    const total = Object.values(d).reduce((a,b) => a + b.length, 0);
+    document.getElementById('r').textContent += ' — ' + total + ' leads carregados ✅';
+  })
+  .catch(e => { document.getElementById('r').textContent = 'Fetch ERRO: ' + e.message; });
+</script>
+</body></html>`);
+  } catch(e) { res.send('Erro Supabase: ' + e.message); }
+});
 app.get("/crm", async (req, res) => {
   try { res.json(await buscarLeadsCRM()); } catch (e) { res.json({}); }
 });
