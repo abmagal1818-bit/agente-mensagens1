@@ -1679,46 +1679,51 @@ function hora(iso) { return iso ? new Date(iso).toLocaleTimeString('pt-BR',{hour
 
 async function loadKanban() {
   const board = document.getElementById('board');
-  board.innerHTML = '<p style="padding:20px;color:#555">Carregando...</p>';
+  if (!board) return;
+  board.innerHTML = '<p style="padding:20px;color:#aaa">Buscando dados...</p>';
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
+    setTimeout(() => ctrl.abort(), 8000);
     const r = await fetch(API + '/crm', {signal: ctrl.signal});
-    clearTimeout(timer);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    board.innerHTML = '<p style="padding:20px;color:#aaa">HTTP ' + r.status + '...</p>';
     const data = await r.json();
-    const cols = [
-      {id:'quente',t:'🔥 Quente',c:'col-q'},
-      {id:'negociacao',t:'💬 Negociação',c:'col-n'},
-      {id:'aguardando',t:'⏳ Aguardando',c:'col-a'},
-      {id:'visita_agendada',t:'📅 Visita',c:'col-v'},
-      {id:'frio',t:'❄️ Frio',c:'col-f'},
-      {id:'fechado',t:'✅ Fechado',c:'col-fe'}
-    ];
     let total = 0;
-    Object.values(data).forEach(a => total += a.length);
+    const estagios = ['quente','negociacao','aguardando','visita_agendada','frio','fechado'];
+    estagios.forEach(function(e) { if (data[e]) total += data[e].length; });
     document.getElementById('st').textContent = total + ' leads';
-    board.innerHTML = cols.map(col => {
-      const cards = data[col.id] || [];
-      return '<div class="col ' + col.c + '">' +
-        '<div class="col-header"><span class="col-titulo">' + col.t + '</span><span class="col-count">' + cards.length + '</span></div>' +
-        '<div class="cards">' +
-        (cards.length === 0 ? '<div style="padding:8px;text-align:center;color:#333;font-size:10px">Vazio</div>' :
-        cards.map(c =>
-          '<div class="card" data-tel="' + c.telefone + '">' +
-          '<div class="card-tel">' + c.formatado + '</div>' +
-          (c.veiculo ? '<div class="card-car">🚗 ' + c.veiculo + '</div>' : '') +
-          '<div class="card-msg">' + (c.ultimaMensagem || '—') + '</div>' +
-          '<div class="card-tempo">' + c.tempoLabel + '</div>' +
-          '<div class="card-btns">' +
-          '<button class="cbtn cbtn-chat" data-tel="' + c.telefone + '" onclick="abrirChat(this.dataset.tel)">💬 Chat</button>' +
-          '<button class="cbtn cbtn-mover" data-tel="' + c.telefone + '" onclick="prepMover(this.dataset.tel)">↕</button>' +
-          '</div></div>'
-        ).join('')) +
-        '</div></div>';
-    }).join('');
+    var nomes = {quente:'🔥 Quente',negociacao:'💬 Negociação',aguardando:'⏳ Aguardando',visita_agendada:'📅 Visita',frio:'❄️ Frio',fechado:'✅ Fechado'};
+    var cores = {quente:'col-q',negociacao:'col-n',aguardando:'col-a',visita_agendada:'col-v',frio:'col-f',fechado:'col-fe'};
+    var html = '';
+    for (var i = 0; i < estagios.length; i++) {
+      var e = estagios[i];
+      var cards = data[e] || [];
+      var cardsHtml = '';
+      if (cards.length === 0) {
+        cardsHtml = '<div style="padding:8px;text-align:center;color:#444;font-size:10px">Vazio</div>';
+      } else {
+        for (var j = 0; j < cards.length; j++) {
+          var c = cards[j];
+          var tel = String(c.telefone || '');
+          var msg = String(c.ultimaMensagem || '').substring(0, 50);
+          var vei = String(c.veiculo || '');
+          cardsHtml += '<div class="card">';
+          cardsHtml += '<div class="card-tel">' + (c.formatado || tel) + '</div>';
+          if (vei) cardsHtml += '<div class="card-car">🚗 ' + vei + '</div>';
+          cardsHtml += '<div class="card-msg">' + msg + '</div>';
+          cardsHtml += '<div class="card-tempo">' + (c.tempoLabel || '') + '</div>';
+          cardsHtml += '<div class="card-btns">';
+          cardsHtml += '<button class="cbtn cbtn-chat" data-tel="' + tel + '" onclick="abrirChat(this.getAttribute(\'data-tel\'))">💬</button> ';
+          cardsHtml += '<button class="cbtn cbtn-mover" data-tel="' + tel + '" onclick="prepMover(this.getAttribute(\'data-tel\'))">↕</button>';
+          cardsHtml += '</div></div>';
+        }
+      }
+      html += '<div class="col ' + cores[e] + '">';
+      html += '<div class="col-header"><span class="col-titulo">' + nomes[e] + '</span><span class="col-count">' + cards.length + '</span></div>';
+      html += '<div class="cards">' + cardsHtml + '</div></div>';
+    }
+    board.innerHTML = html;
   } catch(e) {
-    board.innerHTML = '<div class="erro">Erro ao carregar: ' + e.message + '</div>';
+    board.innerHTML = '<div class="erro">❌ ' + e.message + '</div>';
     document.getElementById('st').textContent = 'Erro';
   }
 }
