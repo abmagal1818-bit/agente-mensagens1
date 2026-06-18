@@ -5,6 +5,7 @@ const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type");
@@ -988,6 +989,11 @@ async function processarComandoConsultor(from, text) {
   if (!ehConsultor(from)) return false;
   const t = text.trim().toUpperCase();
 
+  // Ignora mensagens que não são comandos conhecidos do consultor
+  const ehComando = t === "PENDENCIAS" || t === "AUTORIZO" || t === "NEGO" ||
+    t.startsWith("AUTORIZO ") || t.startsWith("NEGO ") || /^SIMULA[CÇ][AÃ]O\s/i.test(text);
+  if (!ehComando) return false;
+
   await carregarDescontoPendente();
 
   // Comando PENDENCIAS
@@ -1018,7 +1024,7 @@ async function processarComandoConsultor(from, text) {
     if (!conversas[telefoneCliente]) {
       const msgs = await buscarMensagens(telefoneCliente);
       conversas[telefoneCliente] = msgs.slice(-20).map(m => ({
-        role: m.tipo === "client" ? "user" : "assistant",
+        role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant",
         content: m.texto || ""
       }));
     }
@@ -1073,6 +1079,13 @@ async function processarComandoConsultor(from, text) {
   // Limpa desconto pendente (memória + persistência)
   await limparDescontoPendente();
 
+  // Salva registro permanente no Supabase como instrução de sistema
+  // para Sarah nunca negar após reinício do servidor
+  const registroDesconto = autorizado
+    ? `[Sistema: desconto AUTORIZADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já confirmou ao cliente que conseguimos a condição especial de R$ 70 mil. NUNCA negar que o desconto foi aprovado. Se o cliente perguntar, confirmar que sim, o desconto foi aprovado.]`
+    : `[Sistema: desconto NEGADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já informou ao cliente que o preço está firme.]`;
+  await salvarMensagem(telefoneCliente, "sistema", registroDesconto);
+
   // Retoma conversa com o cliente
   const msgSistema = autorizado
     ? `[Sistema: nosso consultor autorizou o desconto. Informe ao cliente que conseguimos fazer uma condição especial e tente fechar o negócio. Seja entusiasta mas natural!]`
@@ -1124,7 +1137,7 @@ async function processarMensagem(from, text) {
       const msgs = await buscarMensagens(from);
       if (msgs.length > 0) {
         conversas[from] = msgs.slice(-20).map(m => ({
-          role: m.tipo === "client" ? "user" : "assistant",
+          role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant",
           content: m.texto || ""
         }));
         console.log(`[Histórico] Recuperado: ${conversas[from].length} msgs de ${from}`);
