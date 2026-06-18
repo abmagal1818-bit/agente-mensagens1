@@ -1638,7 +1638,7 @@ textarea:focus{outline:none;border-color:#f0a500}
   </div>
 </div>
 <script>
-const API = '';
+const API = 'https://agente-mensagens1.onrender.com';
 let telAtiva = null;
 let abaAtiva = 'kanban';
 
@@ -1662,7 +1662,10 @@ async function loadKanban() {
   const board = document.getElementById('board');
   board.innerHTML = '<p style="padding:20px;color:#555">Carregando...</p>';
   try {
-    const r = await fetch(API + '/crm');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const r = await fetch(API + '/crm', {signal: ctrl.signal});
+    clearTimeout(timer);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     const cols = [
