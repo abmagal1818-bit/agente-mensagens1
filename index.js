@@ -1715,7 +1715,7 @@ const COLUNAS = [
   {id:'frio',titulo:'❄️ Frio',classe:'coluna-frio'},
   {id:'fechado',titulo:'✅ Fechado',classe:'coluna-fechado'}
 ];
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+if('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(regs=>regs.forEach(r=>r.unregister()));
 function mostrarView(view,el){viewAtiva=view;document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));document.getElementById('view-'+view).classList.add('active');if(el)el.classList.add('active');if(view==='kanban')carregarKanban();if(view==='chat'){carregarConversas();if(isMobile)mostrarSidebar();}}
 function mostrarSidebar(){document.getElementById('chatSidebar').classList.remove('oculta');document.getElementById('chatMain').classList.add('oculta');}
 function mostrarChat(){document.getElementById('chatSidebar').classList.add('oculta');document.getElementById('chatMain').classList.remove('oculta');}
