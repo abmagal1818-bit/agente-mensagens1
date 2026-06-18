@@ -1527,315 +1527,178 @@ app.get("/registrar", async (req, res) => {
 // ─────────────────────────────────────────────
 
 app.get("/painel", async (req, res) => {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  const numPendencias = descontoPendente ? 1 : 0;
-  const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sarah CRM</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh}
-header{background:#111;border-bottom:1px solid #222;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
-h1{font-size:16px;color:#fff;font-weight:700}h1 span{color:#f0a500}
-.dot{width:8px;height:8px;border-radius:50%;background:#4caf50;display:inline-block;margin-right:5px;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.badge{background:#f0a500;color:#000;font-size:10px;padding:2px 7px;border-radius:8px;margin-left:6px;font-weight:700}
-.tabs{display:flex;gap:4px;padding:10px 16px;background:#111;border-bottom:1px solid #1e1e1e}
-.tab{padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;color:#888;border:1px solid transparent}
-.tab.ativo{background:#1e1e1e;color:#f0a500;border-color:#333}
-.secao{display:none;padding:10px}.secao.ativa{display:block}
-.kanban{display:flex;gap:10px;overflow-x:auto;padding-bottom:10px}
-.col{min-width:200px;background:#111;border-radius:10px;border:1px solid #1e1e1e;flex-shrink:0}
-.col-header{padding:9px 11px;display:flex;justify-content:space-between;border-bottom:1px solid #1a1a1a}
-.col-titulo{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}
-.col-count{font-size:10px;background:#1e1e1e;padding:1px 6px;border-radius:8px;color:#888}
-.col-q .col-titulo{color:#ff6b35}.col-n .col-titulo{color:#f0a500}.col-a .col-titulo{color:#64b5f6}
-.col-v .col-titulo{color:#81c784}.col-f .col-titulo{color:#90a4ae}.col-fe .col-titulo{color:#ce93d8}
-.col-q{border-top:2px solid #ff6b35}.col-n{border-top:2px solid #f0a500}.col-a{border-top:2px solid #64b5f6}
-.col-v{border-top:2px solid #81c784}.col-f{border-top:2px solid #90a4ae}.col-fe{border-top:2px solid #ce93d8}
-.cards{padding:7px;display:flex;flex-direction:column;gap:6px;max-height:60vh;overflow-y:auto}
-.card{background:#161616;border-radius:8px;padding:9px 10px;border:1px solid #1e1e1e;cursor:pointer}
-.card:active{background:#1e1e1e}
-.card-tel{font-size:12px;font-weight:600;color:#fff}
-.card-car{font-size:10px;color:#f0a500;margin-top:2px}
-.card-msg{font-size:10px;color:#555;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-tempo{font-size:9px;color:#444;margin-top:3px}
-.card-btns{display:flex;gap:4px;margin-top:6px}
-.cbtn{font-size:10px;padding:4px 8px;border-radius:5px;border:none;cursor:pointer;font-weight:500}
-.cbtn-chat{background:#1e2a1e;color:#81c784}.cbtn-mover{background:#1e1e1e;color:#888}
-.conv-item{padding:10px 14px;border-bottom:1px solid #141414;cursor:pointer}
-.conv-item:active{background:#1a1a1a}
-.conv-tel{font-size:13px;font-weight:600;color:#fff}
-.conv-msg{font-size:11px;color:#555;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.conv-hora{font-size:10px;color:#444;margin-top:2px}
-.unread{border-left:3px solid #f44336}
-.badge-msg{background:#f44336;color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;margin-left:4px}
-.chat-area{display:flex;flex-direction:column;height:calc(100vh - 140px)}
-.msgs{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px}
-.msg{max-width:82%}.msg.client{align-self:flex-start}.msg.sara,.msg.intervencao{align-self:flex-end}
-.bubble{padding:8px 11px;border-radius:10px;font-size:13px;line-height:1.5;word-break:break-word}
-.msg.client .bubble{background:#1e1e1e;color:#ddd;border-bottom-left-radius:3px}
-.msg.sara .bubble{background:#1a3a1a;color:#b8e6b8;border-bottom-right-radius:3px}
-.msg.intervencao .bubble{background:#2a1a00;color:#f0c060;border-bottom-right-radius:3px;border:1px solid #f0a500}
-.msg-hora{font-size:9px;color:#444;margin-top:2px}.msg.sara .msg-hora,.msg.intervencao .msg-hora{text-align:right}
-.msg-label{font-size:9px;font-weight:700;text-transform:uppercase;color:#555;margin-bottom:2px}
-.msg.sara .msg-label{color:#3a7;text-align:right}.msg.intervencao .msg-label{color:#f0a500;text-align:right}
-.send-area{background:#111;border-top:1px solid #1e1e1e;padding:8px 12px}
-.send-row{display:flex;gap:6px}
-textarea{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:7px;color:#fff;padding:8px 10px;font-size:13px;resize:none;height:44px;font-family:inherit}
-textarea:focus{outline:none;border-color:#f0a500}
-.btn{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:600}
-.btn-gold{background:#f0a500;color:#000}.btn-red{background:#f44336;color:#fff}
-.btn-blue{background:#1565c0;color:#fff}.btn-gray{background:#222;color:#fff}
-.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;align-items:flex-end;justify-content:center}
-.modal.open{display:flex}
-.modal-box{background:#161616;border:1px solid #2a2a2a;border-radius:16px 16px 0 0;padding:16px;width:100%;max-width:500px}
-.modal-box h3{font-size:13px;text-align:center;margin-bottom:12px}
-.mopt{padding:12px 14px;border-radius:10px;border:1px solid #2a2a2a;cursor:pointer;font-size:13px;margin-bottom:6px}
-.mopt:active{background:#1a1a14;border-color:#f0a500}
-.mcancel{width:100%;padding:12px;background:#1e1e1e;border:none;border-radius:10px;color:#888;cursor:pointer;font-size:13px;margin-top:4px}
-.voltar{display:none;background:#222;border:none;color:#fff;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-right:8px}
-.chat-header{padding:10px 14px;background:#111;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;justify-content:space-between}
-.chat-btns{display:flex;gap:4px;flex-wrap:wrap}
-.status-bar{font-size:11px;color:#888;display:flex;align-items:center;gap:6px}
-.erro{color:#f44336;padding:20px;font-size:12px;text-align:center}
-@media(max-width:600px){.voltar{display:inline-block}}
-</style>
-</head>
-<body>
-<header>
-  <h1>Sarah <span>CRM</span>${numPendencias > 0 ? '<span class="badge">💰 ' + numPendencias + '</span>' : ''}</h1>
-  <div class="status-bar"><span class="dot"></span><span id="st">...</span></div>
-</header>
-<div class="tabs">
-  <div class="tab ativo" onclick="aba('kanban',this)">📋 Pipeline</div>
-  <div class="tab" onclick="aba('chats',this)">💬 Chats</div>
-</div>
-<div id="kanban" class="secao ativa">
-  <div class="kanban" id="board"><p style="padding:20px;color:#555">Carregando pipeline...</p></div>
-</div>
-<div id="chats" class="secao">
-  <div id="lista"></div>
-  <div id="chat" style="display:none">
-    <div class="chat-header">
-      <div style="display:flex;align-items:center">
-        <button class="voltar" onclick="voltarLista()">← Voltar</button>
-        <div>
-          <div id="chat-tel" style="font-size:13px;font-weight:600"></div>
-          <div id="chat-estagio" style="font-size:10px;color:#888"></div>
-        </div>
-      </div>
-      <div class="chat-btns">
-        <button class="btn btn-blue" onclick="abrirModal()">↕ Mover</button>
-        <button class="btn btn-red" onclick="salvarAprendizado()">💡</button>
-      </div>
-    </div>
-    <div class="chat-area">
-      <div class="msgs" id="msgs"></div>
-      <div class="send-area">
-        <p style="font-size:10px;color:#f0a500;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">⚡ Enviar como Sarah</p>
-        <div class="send-row">
-          <textarea id="txt" placeholder="Digite aqui..."></textarea>
-          <button class="btn btn-gold" onclick="enviar()">→</button>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-<div class="modal" id="modal">
-  <div class="modal-box">
-    <h3>Mover lead para...</h3>
-    <div class="mopt" onclick="mover('quente')">🔥 Quente</div>
-    <div class="mopt" onclick="mover('negociacao')">💬 Negociação</div>
-    <div class="mopt" onclick="mover('aguardando')">⏳ Aguardando</div>
-    <div class="mopt" onclick="mover('visita_agendada')">📅 Visita agendada</div>
-    <div class="mopt" onclick="mover('frio')">❄️ Frio</div>
-    <div class="mopt" onclick="mover('fechado')">✅ Fechado</div>
-    <button class="mcancel" onclick="fecharModal()">Cancelar</button>
-  </div>
-</div>
-<script>
-const API = 'https://agente-mensagens1.onrender.com';
-let telAtiva = null;
-let abaAtiva = 'kanban';
-
-function aba(id, el) {
-  abaAtiva = id;
-  document.querySelectorAll('.secao').forEach(s => s.classList.remove('ativa'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('ativo'));
-  document.getElementById(id).classList.add('ativa');
-  el.classList.add('ativo');
-  if (id === 'kanban') loadKanban();
-  if (id === 'chats') loadLista();
-}
-
-function fmt(num) {
-  const n = String(num).replace(/\\D/g,'');
-  return n.length >= 12 ? '(' + n.slice(2,4) + ') ' + n.slice(4,9) + '-' + n.slice(9) : num;
-}
-function hora(iso) { return iso ? new Date(iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : ''; }
-
-async function loadKanban() {
-  const board = document.getElementById('board');
-  if (!board) return;
-  board.innerHTML = '<p style="padding:20px;color:#aaa">Buscando dados...</p>';
+  res.setHeader("Cache-Control", "no-store");
   try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 8000);
-    const r = await fetch(API + '/crm', {signal: ctrl.signal});
-    board.innerHTML = '<p style="padding:20px;color:#aaa">HTTP ' + r.status + '...</p>';
-    const data = await r.json();
-    let total = 0;
-    const estagios = ['quente','negociacao','aguardando','visita_agendada','frio','fechado'];
-    estagios.forEach(function(e) { if (data[e]) total += data[e].length; });
-    document.getElementById('st').textContent = total + ' leads';
-    var nomes = {quente:'🔥 Quente',negociacao:'💬 Negociação',aguardando:'⏳ Aguardando',visita_agendada:'📅 Visita',frio:'❄️ Frio',fechado:'✅ Fechado'};
-    var cores = {quente:'col-q',negociacao:'col-n',aguardando:'col-a',visita_agendada:'col-v',frio:'col-f',fechado:'col-fe'};
-    var html = '';
-    for (var i = 0; i < estagios.length; i++) {
-      var e = estagios[i];
-      var cards = data[e] || [];
-      var cardsHtml = '';
-      if (cards.length === 0) {
-        cardsHtml = '<div style="padding:8px;text-align:center;color:#444;font-size:10px">Vazio</div>';
-      } else {
-        for (var j = 0; j < cards.length; j++) {
-          var c = cards[j];
-          var tel = String(c.telefone || '');
-          var msg = String(c.ultimaMensagem || '').substring(0, 50);
-          var vei = String(c.veiculo || '');
-          cardsHtml += '<div class="card">';
-          cardsHtml += '<div class="card-tel">' + (c.formatado || tel) + '</div>';
-          if (vei) cardsHtml += '<div class="card-car">🚗 ' + vei + '</div>';
-          cardsHtml += '<div class="card-msg">' + msg + '</div>';
-          cardsHtml += '<div class="card-tempo">' + (c.tempoLabel || '') + '</div>';
-          cardsHtml += '<div class="card-btns">';
-          cardsHtml += '<button class="cbtn cbtn-chat" data-tel="' + tel + '" onclick="abrirChat(this.getAttribute(\'data-tel\'))">💬</button> ';
-          cardsHtml += '<button class="cbtn cbtn-mover" data-tel="' + tel + '" onclick="prepMover(this.getAttribute(\'data-tel\'))">↕</button>';
-          cardsHtml += '</div></div>';
-        }
-      }
-      html += '<div class="col ' + cores[e] + '">';
-      html += '<div class="col-header"><span class="col-titulo">' + nomes[e] + '</span><span class="col-count">' + cards.length + '</span></div>';
-      html += '<div class="cards">' + cardsHtml + '</div></div>';
-    }
-    board.innerHTML = html;
+    const kanban = await buscarLeadsCRM();
+    const pendente = descontoPendente;
+    const estagios = [
+      {id:'quente', label:'🔥 Quente', cor:'#ff6b35'},
+      {id:'negociacao', label:'💬 Negociação', cor:'#f0a500'},
+      {id:'aguardando', label:'⏳ Aguardando', cor:'#64b5f6'},
+      {id:'visita_agendada', label:'📅 Visita', cor:'#81c784'},
+      {id:'frio', label:'❄️ Frio', cor:'#90a4ae'},
+      {id:'fechado', label:'✅ Fechado', cor:'#ce93d8'}
+    ];
+    let totalLeads = 0;
+    estagios.forEach(e => { if (kanban[e.id]) totalLeads += kanban[e.id].length; });
+
+    let colunasHtml = '';
+    estagios.forEach(est => {
+      const cards = kanban[est.id] || [];
+      let cardsHtml = cards.length === 0
+        ? '<p style="color:#444;font-size:11px;text-align:center;padding:10px">Vazio</p>'
+        : cards.map(c => {
+            const tel = String(c.telefone || '');
+            const msg = String(c.ultimaMensagem || '').substring(0, 60);
+            const vei = String(c.veiculo || '');
+            return '<div style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
+              '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
+              (vei ? '<div style="font-size:11px;color:#f0a500;margin-top:3px">🚗 ' + vei + '</div>' : '') +
+              '<div style="font-size:11px;color:#555;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
+              '<div style="font-size:10px;color:#444;margin-top:3px">' + (c.tempoLabel || '') + '</div>' +
+              '<div style="margin-top:8px;display:flex;gap:6px">' +
+              '<a href="/painel/chat/' + tel + '" style="background:#1e2a1e;color:#81c784;padding:4px 10px;border-radius:5px;font-size:11px;text-decoration:none">💬 Chat</a>' +
+              '</div></div>';
+          }).join('');
+
+      colunasHtml += '<div style="min-width:220px;max-width:220px;background:#111;border-radius:10px;border-top:2px solid ' + est.cor + ';flex-shrink:0">' +
+        '<div style="padding:10px 12px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center">' +
+        '<span style="font-size:11px;font-weight:700;text-transform:uppercase;color:' + est.cor + '">' + est.label + '</span>' +
+        '<span style="font-size:11px;background:#1e1e1e;padding:1px 7px;border-radius:8px;color:#888">' + cards.length + '</span>' +
+        '</div>' +
+        '<div style="padding:8px;max-height:65vh;overflow-y:auto">' + cardsHtml + '</div>' +
+        '</div>';
+    });
+
+    const html = '<!DOCTYPE html><html lang="pt-BR"><head>' +
+      '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>Sarah CRM</title>' +
+      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}' +
+      'a{color:inherit}header{background:#111;border-bottom:1px solid #222;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0}' +
+      '.dot{width:8px;height:8px;background:#4caf50;border-radius:50%;display:inline-block;margin-right:6px;animation:p 2s infinite}' +
+      '@keyframes p{0%,100%{opacity:1}50%{opacity:.4}}' +
+      '.badge{background:#f0a500;color:#000;font-size:10px;padding:2px 7px;border-radius:8px;margin-left:6px;font-weight:700}' +
+      '.board{display:flex;gap:12px;padding:14px;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
+      '</style></head><body>' +
+      '<header>' +
+      '<h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span>' +
+      (pendente ? '<span class="badge">💰 1 desconto</span>' : '') + '</h1>' +
+      '<div style="font-size:12px;color:#888"><span class="dot"></span>' + totalLeads + ' leads</div>' +
+      '</header>' +
+      '<div style="padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px">' +
+      '<a href="/painel" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">📋 Pipeline</a>' +
+      '<a href="/painel/lista" style="color:#888;font-size:12px;text-decoration:none">💬 Conversas</a>' +
+      '</div>' +
+      '<div class="board">' + colunasHtml + '</div>' +
+      '</body></html>';
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
   } catch(e) {
-    board.innerHTML = '<div class="erro">❌ ' + e.message + '</div>';
-    document.getElementById('st').textContent = 'Erro';
+    res.send('<html><body style="background:#000;color:#f44;padding:20px;font-family:monospace">Erro: ' + e.message + '</body></html>');
   }
-}
+});
 
-async function loadLista() {
-  const lista = document.getElementById('lista');
-  lista.innerHTML = '<p style="padding:20px;color:#555">Carregando conversas...</p>';
+
+app.get("/painel/lista", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
-    const r = await fetch(API + '/painel/conversas');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    document.getElementById('st').textContent = (data.conversas||[]).length + ' conv.';
-    if (!data.conversas?.length) { lista.innerHTML = '<p style="padding:20px;color:#555">Sem conversas</p>'; return; }
-    lista.innerHTML = data.conversas.map(c =>
-      '<div class="conv-item ' + (c.naoLida > 0 ? 'unread' : '') + '" data-tel="' + c.from + '" onclick="abrirChat(this.dataset.tel)">' +
-      '<div class="conv-tel">' + fmt(c.from) + (c.naoLida > 0 ? '<span class="badge-msg">' + c.naoLida + '</span>' : '') + '</div>' +
-      '<div class="conv-msg">' + (c.ultimaMensagem || '') + '</div>' +
-      '<div class="conv-hora">' + hora(c.ultimaAtividade) + '</div>' +
-      '</div>'
-    ).join('');
+    const conversas = await listarConversas();
+    let itens = conversas.map(c => {
+      const tel = String(c.from || '');
+      const msg = String(c.ultimaMensagem || '').substring(0, 60);
+      const hora = c.ultimaAtividade ? new Date(c.ultimaAtividade).toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit'}) : '';
+      return '<a href="/painel/chat/' + tel + '" style="display:block;padding:12px 16px;border-bottom:1px solid #141414;text-decoration:none;' + (c.naoLida > 0 ? 'border-left:3px solid #f44336' : '') + '">' +
+        '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + (c.naoLida > 0 ? ' <span style="background:#f44336;color:#fff;font-size:10px;padding:1px 5px;border-radius:8px">' + c.naoLida + '</span>' : '') + '</div>' +
+        '<div style="font-size:11px;color:#555;margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
+        '<div style="font-size:10px;color:#444;margin-top:2px">' + hora + '</div>' +
+        '</a>';
+    }).join('');
+
+    const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conversas — Sarah CRM</title>' +
+      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}a{color:inherit}' +
+      'header{background:#111;border-bottom:1px solid #222;padding:12px 16px;position:sticky;top:0}' +
+      '.tabs{padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px}</style></head><body>' +
+      '<header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>' +
+      '<div class="tabs"><a href="/painel" style="color:#888;font-size:12px;text-decoration:none">📋 Pipeline</a>' +
+      '<a href="/painel/lista" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">💬 Conversas</a></div>' +
+      (itens || '<p style="padding:20px;color:#555">Nenhuma conversa</p>') +
+      '</body></html>';
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
   } catch(e) {
-    lista.innerHTML = '<div class="erro">Erro: ' + e.message + '</div>';
+    res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
   }
-}
+});
 
-async function abrirChat(tel) {
-  telAtiva = tel;
-  document.getElementById('lista').style.display = 'none';
-  document.getElementById('chat').style.display = 'block';
-  document.getElementById('chat-tel').textContent = fmt(tel);
-  await fetch(API + '/painel/visualizar', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:tel})});
-  await loadMsgs(tel);
-}
-
-function voltarLista() {
-  telAtiva = null;
-  document.getElementById('chat').style.display = 'none';
-  document.getElementById('lista').style.display = 'block';
-  loadLista();
-}
-
-async function loadMsgs(tel) {
-  const msgs = document.getElementById('msgs');
+app.get("/painel/chat/:tel", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const tel = req.params.tel;
   try {
-    const r = await fetch(API + '/painel/mensagens/' + tel);
-    const data = await r.json();
-    if (!data.mensagens?.length) { msgs.innerHTML = '<p style="padding:20px;color:#555;text-align:center">Sem mensagens</p>'; return; }
-    msgs.innerHTML = data.mensagens.map(m =>
-      '<div class="msg ' + m.tipo + '">' +
-      '<div class="msg-label">' + (m.tipo==='client'?'👤 Cliente':m.tipo==='sara'?'🤖 Sarah':'⚡ Você') + '</div>' +
-      '<div class="bubble">' + (m.texto||'').replace(/\\n/g,'<br>') + '</div>' +
-      '<div class="msg-hora">' + hora(m.criado_em) + '</div>' +
-      '</div>'
-    ).join('');
-    msgs.scrollTop = msgs.scrollHeight;
-  } catch(e) { msgs.innerHTML = '<div class="erro">Erro: ' + e.message + '</div>'; }
-}
+    const mensagens = await buscarMensagens(tel);
+    const numero = tel.replace(/\D/g, '');
+    const formatado = numero.length >= 12 ? '(' + numero.slice(2,4) + ') ' + numero.slice(4,9) + '-' + numero.slice(9) : tel;
 
-async function enviar() {
-  if (!telAtiva) return;
-  const txt = document.getElementById('txt').value.trim();
-  if (!txt) return;
-  const r = await fetch(API + '/painel/intervencao', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:telAtiva,texto:txt})});
-  if (r.ok) { document.getElementById('txt').value = ''; await loadMsgs(telAtiva); }
-}
+    let msgsHtml = mensagens.map(m => {
+      const tipo = m.tipo || 'client';
+      const texto = String(m.texto || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+      const hora = m.criado_em ? new Date(m.criado_em).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
+      const alinha = tipo === 'client' ? 'flex-start' : 'flex-end';
+      const bg = tipo === 'client' ? '#1e1e1e' : tipo === 'sara' ? '#1a3a1a' : '#2a1a00';
+      const cor = tipo === 'client' ? '#ddd' : tipo === 'sara' ? '#b8e6b8' : '#f0c060';
+      const label = tipo === 'client' ? '👤 Cliente' : tipo === 'sara' ? '🤖 Sarah' : '⚡ Você';
+      return '<div style="display:flex;justify-content:' + alinha + ';margin-bottom:8px">' +
+        '<div style="max-width:82%">' +
+        '<div style="font-size:9px;color:#555;margin-bottom:2px;text-align:' + (tipo==='client'?'left':'right') + '">' + label + '</div>' +
+        '<div style="background:' + bg + ';color:' + cor + ';padding:8px 11px;border-radius:10px;font-size:13px;line-height:1.5">' + texto + '</div>' +
+        '<div style="font-size:9px;color:#444;margin-top:2px;text-align:' + (tipo==='client'?'left':'right') + '">' + hora + '</div>' +
+        '</div></div>';
+    }).join('');
 
-function abrirModal() { if (telAtiva) document.getElementById('modal').classList.add('open'); }
-function fecharModal() { document.getElementById('modal').classList.remove('open'); }
-function prepMover(tel) { telAtiva = tel; abrirModal(); }
+    const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + formatado + '</title>' +
+      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}' +
+      'header{background:#111;border-bottom:1px solid #222;padding:10px 14px;display:flex;align-items:center;gap:10px;position:sticky;top:0}' +
+      '.msgs{padding:12px;min-height:70vh}' +
+      'form{position:sticky;bottom:0;background:#111;border-top:1px solid #1e1e1e;padding:10px 12px;display:flex;gap:8px}' +
+      'textarea{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:7px;color:#fff;padding:8px;font-size:13px;height:44px;font-family:inherit;resize:none}' +
+      'button{background:#f0a500;color:#000;border:none;border-radius:7px;padding:0 16px;font-size:13px;font-weight:700;cursor:pointer}</style></head><body>' +
+      '<header>' +
+      '<a href="/painel/lista" style="color:#f0a500;text-decoration:none;font-size:20px">←</a>' +
+      '<div><div style="font-size:14px;font-weight:600">' + formatado + '</div></div>' +
+      '</header>' +
+      '<div class="msgs">' + (msgsHtml || '<p style="color:#555;text-align:center;padding:20px">Sem mensagens</p>') + '</div>' +
+      '<form action="/painel/enviar" method="POST">' +
+      '<input type="hidden" name="tel" value="' + tel + '">' +
+      '<textarea name="texto" placeholder="Enviar como Sarah..."></textarea>' +
+      '<button type="submit">→</button>' +
+      '</form>' +
+      '</body></html>';
 
-async function mover(estagio) {
-  if (!telAtiva) return;
-  await fetch(API + '/crm/mover', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({telefone:telAtiva,estagio})});
-  fecharModal();
-  loadKanban();
-}
-
-async function salvarAprendizado() {
-  const sit = prompt('Descreva a situação:');
-  if (!sit) return;
-  const cor = prompt('Como a Sarah deveria responder?');
-  if (!cor) return;
-  await fetch(API + '/painel/aprendizado', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({situacao:sit,correcao:cor})});
-  alert('✅ Salvo!');
-}
-
-document.getElementById('txt').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); }
-});
-document.getElementById('modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('modal')) fecharModal();
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch(e) {
+    res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
+  }
 });
 
-loadKanban();
-setInterval(() => {
-  if (abaAtiva === 'kanban') loadKanban();
-  else if (abaAtiva === 'chats') { loadLista(); if (telAtiva) loadMsgs(telAtiva); }
-}, 10000);
-</script>
-</body>
-</html>`;
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(html);
+app.post("/painel/enviar", async (req, res) => {
+  const { tel, texto } = req.body;
+  if (tel && texto) {
+    try {
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: tel, text: { body: texto } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      if (!conversas[tel]) conversas[tel] = [];
+      conversas[tel].push({ role: "assistant", content: texto });
+      await salvarMensagem(tel, "intervencao", texto);
+    } catch(e) { console.error("Erro enviar:", e.message); }
+  }
+  res.redirect("/painel/chat/" + tel);
 });
 
 
-app.get("/painel/conversas", async (req, res) => {
-  try { res.json({ conversas: await listarConversas() }); } catch (e) { res.json({ conversas: [] }); }
-});
 app.get("/painel/mensagens/:from", async (req, res) => {
   try { res.json({ mensagens: await buscarMensagens(req.params.from) }); } catch (e) { res.json({ mensagens: [] }); }
 });
