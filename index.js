@@ -1705,14 +1705,14 @@ async function loadKanban() {
         '<div class="cards">' +
         (cards.length === 0 ? '<div style="padding:8px;text-align:center;color:#333;font-size:10px">Vazio</div>' :
         cards.map(c =>
-          '<div class="card">' +
+          '<div class="card" data-tel="' + c.telefone + '">' +
           '<div class="card-tel">' + c.formatado + '</div>' +
           (c.veiculo ? '<div class="card-car">🚗 ' + c.veiculo + '</div>' : '') +
           '<div class="card-msg">' + (c.ultimaMensagem || '—') + '</div>' +
           '<div class="card-tempo">' + c.tempoLabel + '</div>' +
           '<div class="card-btns">' +
-          '<button class="cbtn cbtn-chat" onclick="abrirChat(\'' + c.telefone + '\')">💬 Chat</button>' +
-          '<button class="cbtn cbtn-mover" onclick="prepMover(\'' + c.telefone + '\')">↕</button>' +
+          '<button class="cbtn cbtn-chat" data-tel="' + c.telefone + '" onclick="abrirChat(this.dataset.tel)">💬 Chat</button>' +
+          '<button class="cbtn cbtn-mover" data-tel="' + c.telefone + '" onclick="prepMover(this.dataset.tel)">↕</button>' +
           '</div></div>'
         ).join('')) +
         '</div></div>';
@@ -1733,7 +1733,7 @@ async function loadLista() {
     document.getElementById('st').textContent = (data.conversas||[]).length + ' conv.';
     if (!data.conversas?.length) { lista.innerHTML = '<p style="padding:20px;color:#555">Sem conversas</p>'; return; }
     lista.innerHTML = data.conversas.map(c =>
-      '<div class="conv-item ' + (c.naoLida > 0 ? 'unread' : '') + '" onclick="abrirChat(\'' + c.from + '\')">' +
+      '<div class="conv-item ' + (c.naoLida > 0 ? 'unread' : '') + '" data-tel="' + c.from + '" onclick="abrirChat(this.dataset.tel)">' +
       '<div class="conv-tel">' + fmt(c.from) + (c.naoLida > 0 ? '<span class="badge-msg">' + c.naoLida + '</span>' : '') + '</div>' +
       '<div class="conv-msg">' + (c.ultimaMensagem || '') + '</div>' +
       '<div class="conv-hora">' + hora(c.ultimaAtividade) + '</div>' +
