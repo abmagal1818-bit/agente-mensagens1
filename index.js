@@ -668,6 +668,36 @@ async function verificarVisitasNaoConfirmadas() {
 setInterval(verificarVisitasNaoConfirmadas, 15 * 60 * 1000); // verifica a cada 15 min
 
 
+// Nome do template aprovado na Meta (configurável via variável de ambiente)
+// Precisa ser criado e aprovado no WhatsApp Manager antes de funcionar.
+const TEMPLATE_FOLLOWUP = process.env.TEMPLATE_FOLLOWUP_NAME || "followup_generico";
+
+async function enviarMensagemTemplate(telefone, nomeTemplate, parametros = []) {
+  try {
+    const components = parametros.length > 0 ? [{
+      type: "body",
+      parameters: parametros.map(p => ({ type: "text", text: String(p) }))
+    }] : [];
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: telefone,
+        type: "template",
+        template: {
+          name: nomeTemplate,
+          language: { code: "pt_BR" },
+          components
+        }
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    return true;
+  } catch (e) {
+    console.error(`[Template] Erro ao enviar "${nomeTemplate}":`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+    return false;
+  }
+}
+
 async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
@@ -705,10 +735,21 @@ async function processarFollowUpsPendentes() {
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
       try {
-        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-          { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
-          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-        );
+        // Follow-ups disparam depois de tempo (1-7 dias ou 2h), então é provável
+        // que a janela de 24h já tenha fechado. Usa template aprovado pela Meta
+        // para garantir entrega. Se falhar (template não existe/aprovado ainda),
+        // tenta texto livre como fallback (funciona se a janela ainda estiver aberta).
+        const veiculo = followup.veiculo_interesse || "nossos veículos";
+        const enviouTemplate = await enviarMensagemTemplate(followup.telefone, TEMPLATE_FOLLOWUP, [veiculo]);
+
+        if (!enviouTemplate) {
+          console.log(`[FollowUp] Template falhou, tentando texto livre para ${followup.telefone}`);
+          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+            { messaging_product: "whatsapp", to: followup.telefone, text: { body: mensagem } },
+            { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+          );
+        }
+
         await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
         await salvarMensagem(followup.telefone, "sara", mensagem);
         if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
@@ -1736,10 +1777,18 @@ app.get("/painel/lista", async (req, res) => {
 app.get("/painel/chat/:tel", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const tel = req.params.tel;
+  const erro = req.query.erro;
   try {
     const mensagens = await buscarMensagens(tel);
     const numero = tel.replace(/\D/g, '');
     const formatado = numero.length >= 12 ? '(' + numero.slice(2,4) + ') ' + numero.slice(4,9) + '-' + numero.slice(9) : tel;
+
+    let avisoErro = '';
+    if (erro === 'janela24h') {
+      avisoErro = '<div style="background:#3a1a00;color:#f0a500;padding:10px 14px;font-size:12px;border-bottom:1px solid #f0a500">⚠️ Não enviado: faz mais de 24h que o cliente não escreve. Use um template aprovado ou espere ele mandar mensagem.</div>';
+    } else if (erro === '1') {
+      avisoErro = '<div style="background:#3a0a0a;color:#f44336;padding:10px 14px;font-size:12px;border-bottom:1px solid #f44336">⚠️ Erro ao enviar a mensagem. Tente de novo.</div>';
+    }
 
     let msgsHtml = mensagens.map(m => {
       const tipo = m.tipo || 'client';
@@ -1768,6 +1817,7 @@ app.get("/painel/chat/:tel", async (req, res) => {
       '<a href="/painel/lista" style="color:#f0a500;text-decoration:none;font-size:20px">←</a>' +
       '<div><div style="font-size:14px;font-weight:600">' + formatado + '</div></div>' +
       '</header>' +
+      avisoErro +
       '<div class="msgs">' + (msgsHtml || '<p style="color:#555;text-align:center;padding:20px">Sem mensagens</p>') + '</div>' +
       '<form action="/painel/enviar" method="POST">' +
       '<input type="hidden" name="tel" value="' + tel + '">' +
@@ -1799,6 +1849,12 @@ app.post("/painel/enviar", async (req, res) => {
     } catch(e) {
       console.error("[Painel] ❌ Erro enviar:", e.message);
       if (e.response) console.error("[Painel] Detalhe Meta:", JSON.stringify(e.response.data));
+      const codigoMeta = e.response?.data?.error?.code;
+      // Código 131047 = fora da janela de 24h, precisa de template
+      if (codigoMeta === 131047) {
+        return res.redirect("/painel/chat/" + tel + "?erro=janela24h");
+      }
+      return res.redirect("/painel/chat/" + tel + "?erro=1");
     }
   } else {
     console.log(`[Painel] ⚠️ Dados faltando — tel: ${tel}, texto: ${texto}`);
