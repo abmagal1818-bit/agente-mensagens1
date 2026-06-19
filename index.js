@@ -61,8 +61,10 @@ const conversasVisualizadas = {};
 const ultimaMensagemCliente = {};
 
 // Estado de coleta de dados para simulação de crédito
-// { telefone: { etapa: 'nome'|'cpf'|'nascimento'|'completo', nome, cpf, nascimento } }
 const coletaCredito = {};
+
+// Visitas agendadas aguardando confirmação: { telefone: timestamp_agendamento }
+const visitasAgendadas = {};
 
 // Desconto pendente: { telefone, info, timestamp }
 // Guarda apenas UM por vez (o mais recente)
@@ -483,7 +485,29 @@ async function detectarEstagio(from, text, historico) {
   const t = text.toLowerCase();
   const hist = (historico || []).map(m => m.content || "").join(" ").toLowerCase();
   if (t.includes("fechei") || t.includes("comprei") || t.includes("vou comprar")) { await atualizarEstagio(from, "fechado"); return; }
-  if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir") || t.includes("vou visitar")) { await atualizarEstagio(from, "visita_agendada"); return; }
+  if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir") || t.includes("vou visitar") || t.includes("amanhã às") || t.includes("amanha as") || t.includes("pode ser às") || t.includes("pode ser as")) {
+    const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
+    const jaEraVisita = clienteAtual?.[0]?.estagio === "visita_agendada";
+    await atualizarEstagio(from, "visita_agendada");
+    // Notifica consultor apenas na primeira vez que agenda visita
+    if (!jaEraVisita) {
+      visitasAgendadas[from] = Date.now(); // registra horário do agendamento
+      const numero = from.replace(/\D/g, "");
+      const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
+      const veiculo = hist.match(/asx|corolla|compass|tracker|renegade|hilux|jetta|civic|hb20|polo|onix|creta|tucson|evoque|ranger|s10|pajero|outlander|cobalt|voyage/i)?.[0] || "veículo";
+      const msg = `📅 *Visita agendada!*\nCliente: ${formatado}\nVeículo de interesse: *${veiculo.toUpperCase()}*\n\nO cliente confirmou que vai vir à loja. Fique de olho! 😊`;
+      try {
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        console.log(`[Visita] ✅ Notificado sobre visita de ${from}`);
+      } catch(e) { console.error("[Visita] Erro notificação:", e.message); }
+      // Agenda follow-up automático em 2h — só dispara se ninguém mudar o estágio antes
+      await agendarFollowUpHoras(from, "visita_nao_confirmada", veiculo, 2);
+    }
+    return;
+  }
   if (hist.includes("parcela") || hist.includes("simulação") || hist.includes("financiar") || hist.includes("na troca") || hist.includes("fotos")) { await atualizarEstagio(from, "negociacao"); return; }
   if (t.includes("não tenho interesse") || t.includes("desisti") || t.includes("esquece")) { await atualizarEstagio(from, "frio"); return; }
   if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) { await atualizarEstagio(from, "aguardando"); return; }
@@ -552,6 +576,19 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar)
   } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
 
+async function agendarFollowUpHoras(telefone, motivo, veiculoInteresse, horasAguardar) {
+  try {
+    const agendadoPara = new Date();
+    agendadoPara.setHours(agendadoPara.getHours() + horasAguardar);
+    await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false).eq("motivo", motivo);
+    const { error } = await supabase.from("followups").insert({
+      telefone, motivo, veiculo_interesse: veiculoInteresse,
+      agendado_para: agendadoPara.toISOString(), enviado: false
+    });
+    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${horasAguardar}h — ${motivo}`);
+  } catch (e) { console.error("[FollowUp] Erro:", e.message); }
+}
+
 async function detectarLeadFrio(from, text, historicoConversa) {
   try {
     const t = text.toLowerCase();
@@ -591,6 +628,46 @@ async function verificarClientesSumidos() {
 
 setInterval(verificarClientesSumidos, 60 * 60 * 1000);
 
+// Verifica visitas agendadas que não foram confirmadas após 2 horas
+async function verificarVisitasNaoConfirmadas() {
+  const agora = Date.now();
+  const DUAS_HORAS = 2 * 60 * 60 * 1000;
+  for (const [telefone, timestamp] of Object.entries(visitasAgendadas)) {
+    if (agora - timestamp < DUAS_HORAS) continue;
+    // Verifica se lead ainda está em visita_agendada (não foi movido)
+    try {
+      const { data } = await supabase.from("clientes").select("estagio, veiculo_interesse").eq("telefone", telefone).limit(1);
+      if (data?.[0]?.estagio !== "visita_agendada") {
+        delete visitasAgendadas[telefone];
+        continue;
+      }
+      // Gera mensagem de reagendamento via Haiku
+      const veiculo = data[0].veiculo_interesse || "nosso veículo";
+      const res = await axios.post("https://api.anthropic.com/v1/messages",
+        { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content:
+          `Você é Sarah, vendedora da Premium Automarcas. Cliente tinha visita agendada mas não compareceu. Mande mensagem curta e simpática sugerindo reagendar para hoje mais tarde ou amanhã. Veículo: ${veiculo}. Máximo 3 linhas. Não mencione nomes da equipe.` }] },
+        { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+      );
+      const msg = res.data.content[0].text;
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: telefone, text: { body: msg } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await salvarMensagem(telefone, "sara", msg);
+      if (!conversas[telefone]) conversas[telefone] = [];
+      conversas[telefone].push({ role: "assistant", content: msg });
+      console.log(`[Visita] ✅ Reagendamento enviado para ${telefone}`);
+      delete visitasAgendadas[telefone];
+    } catch(e) {
+      console.error(`[Visita] Erro reagendamento ${telefone}:`, e.message);
+      delete visitasAgendadas[telefone];
+    }
+  }
+}
+
+setInterval(verificarVisitasNaoConfirmadas, 15 * 60 * 1000); // verifica a cada 15 min
+
+
 async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
@@ -599,7 +676,8 @@ async function gerarMensagemFollowUp(followup) {
       achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Cliente achou ${veiculo} caro. Pergunte qual parcela cabe no orçamento. Máximo 3 linhas.`,
       avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Cliente insatisfeito com avaliação na troca. Reforce que avaliação presencial pode surpreender. Máximo 3 linhas.`,
       sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Cliente sem interesse. Mensagem muito leve. Máximo 2 linhas.`,
-      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar. Máximo 2 linhas.`
+      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar. Máximo 2 linhas.`,
+      visita_nao_confirmada: `Você é Sarah, vendedora da Premium Automarcas. O cliente tinha agendado uma visita pra loja sobre o ${veiculo} mas não temos confirmação de que ele veio. Mensagem tipo "Verifiquei que não conseguiu comparecer no horário agendado. Gostaria de reagendar?" — natural, sem cobrar, sugerindo reagendar pra mais tarde ou outro dia. Máximo 3 linhas.`
     };
     const res = await axios.post("https://api.anthropic.com/v1/messages",
       { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
@@ -614,6 +692,16 @@ async function processarFollowUpsPendentes() {
     const { data: followups } = await supabase.from("followups").select("*").eq("enviado", false).lte("agendado_para", new Date().toISOString());
     if (!followups?.length) return;
     for (const followup of followups) {
+      // Para visita não confirmada: só dispara se o lead AINDA estiver em visita_agendada
+      // (se já foi movido manualmente pra fechado/negociacao/etc, cancela o follow-up)
+      if (followup.motivo === "visita_nao_confirmada") {
+        const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", followup.telefone).limit(1);
+        if (clienteAtual?.[0]?.estagio !== "visita_agendada") {
+          await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
+          console.log(`[FollowUp] Cancelado (estágio mudou): ${followup.telefone}`);
+          continue;
+        }
+      }
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
       try {
@@ -1697,16 +1785,23 @@ app.get("/painel/chat/:tel", async (req, res) => {
 
 app.post("/painel/enviar", async (req, res) => {
   const { tel, texto } = req.body;
+  console.log(`[Painel] Tentando enviar pra ${tel}: "${texto}"`);
   if (tel && texto) {
     try {
-      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      const resp = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to: tel, text: { body: texto } },
         { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
       );
+      console.log(`[Painel] ✅ Enviado! Resposta Meta:`, JSON.stringify(resp.data));
       if (!conversas[tel]) conversas[tel] = [];
       conversas[tel].push({ role: "assistant", content: texto });
       await salvarMensagem(tel, "intervencao", texto);
-    } catch(e) { console.error("Erro enviar:", e.message); }
+    } catch(e) {
+      console.error("[Painel] ❌ Erro enviar:", e.message);
+      if (e.response) console.error("[Painel] Detalhe Meta:", JSON.stringify(e.response.data));
+    }
+  } else {
+    console.log(`[Painel] ⚠️ Dados faltando — tel: ${tel}, texto: ${texto}`);
   }
   res.redirect("/painel/chat/" + tel);
 });
