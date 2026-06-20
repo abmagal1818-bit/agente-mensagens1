@@ -74,15 +74,103 @@ let descontoPendente = null;
 // o cliente manda 2+ mensagens em sequência rápida
 const filaProcessamento = {};
 
-async function processarMensagemNaFila(from, text) {
+async function processarMensagemNaFila(from, text, tentativasAnteriores = 0) {
   // Se já existe processamento em andamento para esse número, encadeia
   const anterior = filaProcessamento[from] || Promise.resolve();
   const atual = anterior
     .catch(() => {}) // não deixa erro anterior travar a fila
-    .then(() => processarMensagem(from, text));
+    .then(() => processarMensagem(from, text, tentativasAnteriores));
   filaProcessamento[from] = atual;
   return atual;
 }
+
+// ─────────────────────────────────────────────
+// ALERTA DE FALHA DA API DA ANTHROPIC
+// ─────────────────────────────────────────────
+// Quando a chamada à API do Claude falha (ex: crédito esgotado, erro de
+// autenticação, rate limit), o cliente fica sem resposta e isso só era
+// percebido quando alguém notava a conversa parada. Esta função avisa
+// o consultor no WhatsApp pessoal assim que isso acontecer, com um
+// cooldown para não inundar de mensagens repetidas no mesmo problema.
+
+let ultimoAlertaApiFalha = 0;
+const COOLDOWN_ALERTA_API = 15 * 60 * 1000; // 15 minutos entre alertas repetidos
+
+async function notificarFalhaApiClaude(erro, contexto = "") {
+  const agora = Date.now();
+  if (agora - ultimoAlertaApiFalha < COOLDOWN_ALERTA_API) return;
+  ultimoAlertaApiFalha = agora;
+
+  const status = erro.response?.status;
+  const mensagemErro = erro.response?.data?.error?.message || erro.message;
+  const tipoErro = erro.response?.data?.error?.type || "desconhecido";
+
+  let motivoAmigavel = "Erro desconhecido na API da Anthropic.";
+  if (mensagemErro?.toLowerCase().includes("credit balance is too low")) {
+    motivoAmigavel = "🚨 *SEM CRÉDITO NA API DA ANTHROPIC!*\nA Sarah PAROU de responder aos clientes. Adicione fundos em console.anthropic.com > Billing.";
+  } else if (status === 401) {
+    motivoAmigavel = "🚨 *Chave de API inválida/expirada!*\nA Sarah parou de funcionar. Verifique a CLAUDE_API_KEY no Render.";
+  } else if (status === 429) {
+    motivoAmigavel = "⚠️ *Limite de requisições (rate limit) atingido.*\nAlgumas respostas podem estar atrasando.";
+  } else if (status >= 500) {
+    motivoAmigavel = "⚠️ *Instabilidade na API da Anthropic* (erro do lado deles). Deve se normalizar sozinho.";
+  }
+
+  const msg = `${motivoAmigavel}\n\n${contexto ? `Contexto: ${contexto}\n` : ""}Status: ${status || "N/A"} | Tipo: ${tipoErro}\nDetalhe: ${String(mensagemErro).substring(0, 200)}`;
+
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: msg } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log("[Alerta API] ✅ Consultor notificado sobre falha da API");
+  } catch (e) {
+    console.error("[Alerta API] Erro ao notificar (e a API principal já está fora!):", e.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// RETRY AUTOMÁTICO DE MENSAGENS QUE FALHARAM
+// ─────────────────────────────────────────────
+// Quando a resposta principal (Sonnet) falha por erro de API (ex: crédito
+// esgotado), a mensagem do cliente fica sem resposta e antes ninguém
+// reprocessava automaticamente depois que o problema fosse resolvido.
+// Esta fila salva a mensagem como pendente e um job periódico tenta de
+// novo, sem precisar que o cliente escreva outra vez.
+
+const MAX_TENTATIVAS_PENDENTE = 6; // depois disso, desiste e só fica registrado
+
+async function salvarMensagemPendente(telefone, texto) {
+  try {
+    await supabase.from("mensagens_pendentes").insert({ telefone, texto, tentativas: 0 });
+    console.log(`[Retry] Mensagem de ${telefone} salva como pendente para reprocessar depois`);
+  } catch (e) {
+    console.error("[Retry] Erro ao salvar mensagem pendente (tabela pode não existir):", e.message);
+  }
+}
+
+async function processarMensagensPendentes() {
+  try {
+    const { data: pendentes } = await supabase.from("mensagens_pendentes").select("*").order("criado_em", { ascending: true }).limit(20);
+    if (!pendentes?.length) return;
+    console.log(`[Retry] ${pendentes.length} mensagem(ns) pendente(s) para reprocessar`);
+    for (const p of pendentes) {
+      try {
+        // Remove da fila ANTES de tentar — se processarMensagem funcionar,
+        // ótimo; se falhar de novo, ela mesma vai re-salvar como pendente
+        // (com tentativas incrementadas) dentro do catch da resposta principal.
+        await supabase.from("mensagens_pendentes").delete().eq("id", p.id);
+        await processarMensagemNaFila(p.telefone, p.texto, p.tentativas || 0);
+      } catch (e) {
+        console.error(`[Retry] Erro ao reprocessar pendente de ${p.telefone}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error("[Retry] Erro ao buscar pendentes:", e.message);
+  }
+}
+
+setInterval(processarMensagensPendentes, 5 * 60 * 1000); // tenta a cada 5 minutos
 
 // ─────────────────────────────────────────────
 // CACHE DE APRENDIZADOS
@@ -380,6 +468,7 @@ Responda:
     return true;
   } catch (e) {
     console.error("[Desconto] Erro:", e.message);
+    if (e.response) await notificarFalhaApiClaude(e, `Extração de pedido de desconto (${from})`);
     return false;
   }
 }
@@ -420,6 +509,7 @@ Texto: "${textos.slice(-5).join(" | ")}"`
       anoBuscado: json.busca?.ano || null
     };
   } catch (e) {
+    if (e.response) await notificarFalhaApiClaude(e, "Extração de contexto da conversa");
     return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
   }
 }
@@ -660,6 +750,7 @@ async function verificarVisitasNaoConfirmadas() {
       delete visitasAgendadas[telefone];
     } catch(e) {
       console.error(`[Visita] Erro reagendamento ${telefone}:`, e.message);
+      if (e.response) await notificarFalhaApiClaude(e, `Reagendamento de visita (${telefone})`);
       delete visitasAgendadas[telefone];
     }
   }
@@ -714,7 +805,10 @@ async function gerarMensagemFollowUp(followup) {
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
-  } catch (e) { return null; }
+  } catch (e) {
+    if (e.response) await notificarFalhaApiClaude(e, `Geração de mensagem de follow-up (${followup.telefone})`);
+    return null;
+  }
 }
 
 async function processarFollowUpsPendentes() {
@@ -794,6 +888,32 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
   } catch (e) { console.error(`[Notificação] Erro carro:`, e.message); }
+}
+
+// Reenvia ao consultor a foto enviada pelo cliente, junto com a análise
+// gerada pela Sarah. Resolve a falta de visibilidade visual: antes, só o
+// texto da análise ficava salvo, a imagem em si nunca era vista por ninguém.
+async function notificarFotoComAnalise(from, mediaUrl, analise, caption = "") {
+  const numero = from.replace(/\D/g, "");
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
+  const legenda = `📸 *Foto recebida de ${formatado}*${caption ? `\nLegenda do cliente: "${caption}"` : ""}\n\n*Análise da Sarah:*\n${analise}`;
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, type: "image", image: { link: mediaUrl, caption: legenda.substring(0, 1024) } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[Foto→Consultor] ✅ Repassada foto de ${from}`);
+  } catch (e) {
+    console.error(`[Foto→Consultor] Erro ao reenviar imagem (tentando só texto):`, e.message);
+    // Fallback: se o reenvio da imagem falhar (ex: URL expirada/sem acesso),
+    // ao menos manda a análise em texto para não perder a informação.
+    try {
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: legenda + "\n\n⚠️ (não foi possível reenviar a imagem original)" } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+    } catch (e2) { console.error(`[Foto→Consultor] Erro também no fallback de texto:`, e2.message); }
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -932,7 +1052,10 @@ async function transcreverAudio(mediaId) {
   } catch (e) { return null; }
 }
 
-async function analisarImagem(mediaId, caption) {
+// Analisa a imagem enviada pelo cliente E repassa (foto + análise) ao
+// consultor no WhatsApp pessoal, para que ele tenha visibilidade visual
+// do veículo sendo avaliado na troca — algo que antes não existia.
+async function analisarImagem(mediaId, caption, from) {
   try {
     const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
     const imageRes = await axios.get(mediaRes.data.url, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
@@ -944,8 +1067,16 @@ async function analisarImagem(mediaId, caption) {
       ]}] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-    return res.data.content[0].text;
-  } catch (e) { return null; }
+    const analise = res.data.content[0].text;
+
+    // Repassa foto + análise ao consultor (não bloqueia o fluxo principal se falhar)
+    if (from) notificarFotoComAnalise(from, mediaRes.data.url, analise, caption).catch(() => {});
+
+    return analise;
+  } catch (e) {
+    if (e.response) await notificarFalhaApiClaude(e, `Análise de imagem (${from || "desconhecido"})`);
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1014,6 +1145,22 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   return null;
 }
 
+// Conta quantos veículos do estoque "batem" com o texto mencionado pelo
+// cliente (ex: "Argo" pode bater com 3 anúncios diferentes). Usado para
+// detectar ambiguidade e instruir a Sarah a perguntar qual deles, em vez
+// de responder com um preço/veículo escolhido arbitrariamente.
+function contarVeiculosAmbiguos(texto, estoque) {
+  const t = texto.toLowerCase();
+  function pontuar(v) {
+    const modelo = limparTexto(v.modelo || "").toLowerCase();
+    const palavras = modelo.split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
+    if (!palavras.length) return 0;
+    return palavras.filter(p => t.includes(p)).length;
+  }
+  const candidatos = estoque.filter(v => pontuar(v) >= 1);
+  return candidatos;
+}
+
 async function enviarFotosVeiculo(to, veiculo) {
   const fotos = (veiculo.fotos || []).slice(0, 5);
   if (!fotos.length) return false;
@@ -1041,7 +1188,7 @@ function formatarEstoque() {
   return estoqueAtual.map(v => `${limparTexto(v.modelo || "")} ${v.ano || ""} - ${Number(v.km || 0).toLocaleString("pt-BR")} km - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n");
 }
 
-const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false) => {
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null) => {
   const agora = new Date();
   const dataHoraAtual = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   return `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -1060,10 +1207,22 @@ REGRA CRÍTICA — NUNCA MENCIONAR NOMES: Nunca cite "Augusto" ou qualquer nome 
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque()}
 
-REGRA CRÍTICA DE PREÇOS:
-- Use EXATAMENTE os preços do estoque acima. NUNCA invente, estime ou arredonde.
-- Se o cliente perguntar o preço, copie o valor exato do estoque.
-- JAMAIS informe um preço diferente do que está listado acima.
+🚨 REGRA CRÍTICA DE PREÇOS — ABSOLUTA, SEM EXCEÇÕES:
+- Use EXATAMENTE os preços do estoque acima, caractere por caractere. NUNCA invente, estime, arredonde ou "lembre de cabeça" um valor.
+- Antes de escrever qualquer preço na resposta, releia a linha exata do estoque correspondente ao veículo. Copie o valor dali.
+- Se o veículo mencionado pelo cliente NÃO aparecer claramente no estoque acima, NÃO cite nenhum valor — diga que vai confirmar com a equipe.
+- Se você não tiver 100% de certeza de qual linha do estoque corresponde ao veículo, pergunte para o cliente confirmar o modelo/ano em vez de chutar um preço aproximado.
+- JAMAIS informe um preço diferente do que está listado acima, mesmo que pareça "razoável" ou "parecido" com outros veículos.
+
+🚨 REGRA CRÍTICA — NUNCA INVENTE O MODELO DO VEÍCULO DO CLIENTE:
+- Quando o cliente estiver descrevendo o carro QUE ELE QUER DAR NA TROCA, NUNCA atribua um nome de modelo que ele não disse explicitamente.
+- Se o cliente disser algo ambíguo como "minha 2006" ou só o ano/motorização sem nome do modelo, NÃO adivinhe nem complete com um modelo do seu conhecimento geral (ex: não vá dizer "Meriva", "Gol", etc. por palpite).
+- Nesse caso, pergunte diretamente: "qual é o modelo do seu carro?" antes de continuar a avaliação.
+- Só repita/confirme o nome de um modelo se o cliente já tiver escrito esse nome em uma mensagem anterior da própria conversa.
+
+${veiculosAmbiguos && veiculosAmbiguos.length > 1 ? `🚨 AMBIGUIDADE DETECTADA — MAIS DE UM VEÍCULO NO ESTOQUE BATE COM O QUE O CLIENTE MENCIONOU:
+${veiculosAmbiguos.map(v => `- ${limparTexto(v.modelo || "")} ${v.ano || ""} - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n")}
+NÃO escolha um desses sozinha nem responda com um preço genérico. Liste rapidamente as opções disponíveis (ano/versão) e pergunte qual delas o cliente quer, ANTES de informar qualquer preço.` : ""}
 
 ${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
 1. Informe que não está disponível no momento
@@ -1086,6 +1245,7 @@ PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórci
 
 AVALIAÇÃO DE TROCA:
 Etapa 1: km, estado geral, revisões, fotos 📸
+- Se o sistema já forneceu uma [Análise de foto] com informações sobre estado geral, pontos positivos ou pontos de atenção do veículo, APROVEITE essas informações. NÃO pergunte de novo sobre algo que a análise da foto já respondeu (ex: não pergunte "como está o estado geral?" se a análise já descreveu o estado). Pergunte apenas o que ainda falta (tipicamente: quilometragem, se não tiver sido informada).
 Etapa 2: Agradeça as fotos
 Etapa 3 (só após tudo): ${fipeInfo ? (() => { const v = calcularValoresTroca(fipeInfo.Valor); return `"Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!" NÃO mencione FIPE.`; })() : "NUNCA invente valores de troca."}
 
@@ -1161,26 +1321,31 @@ async function processarComandoConsultor(from, text) {
     const msgSistema = `[Sistema: resultado da simulação de crédito chegou: "${resultado}". Informe ao cliente de forma natural e entusiasta (se aprovado) ou acolhedora (se negado), sem citar nomes da equipe. Convide para vir à loja fechar o negócio se aprovado.]`;
     conversas[telefoneCliente].push({ role: "user", content: msgSistema });
 
-    const aprendizadosExtraSim = await obterAprendizados();
-    const claudeSim = await axios.post("https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        max_tokens: 500,
-        system: SYSTEM_PROMPT(null, aprendizadosExtraSim, null, false),
-        messages: conversas[telefoneCliente]
-      },
-      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-    );
+    try {
+      const aprendizadosExtraSim = await obterAprendizados();
+      const claudeSim = await axios.post("https://api.anthropic.com/v1/messages",
+        {
+          model: "claude-sonnet-4-5",
+          max_tokens: 500,
+          system: SYSTEM_PROMPT(null, aprendizadosExtraSim, null, false),
+          messages: conversas[telefoneCliente]
+        },
+        { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+      );
 
-    const replySim = claudeSim.data.content[0].text;
-    conversas[telefoneCliente].push({ role: "assistant", content: replySim });
+      const replySim = claudeSim.data.content[0].text;
+      conversas[telefoneCliente].push({ role: "assistant", content: replySim });
 
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: telefoneCliente, text: { body: replySim } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
-    await salvarMensagem(telefoneCliente, "sara", replySim);
-    console.log(`[Crédito] ✅ Resultado enviado para ${telefoneCliente}`);
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: telefoneCliente, text: { body: replySim } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await salvarMensagem(telefoneCliente, "sara", replySim);
+      console.log(`[Crédito] ✅ Resultado enviado para ${telefoneCliente}`);
+    } catch (e) {
+      console.error("[Crédito] Erro ao gerar/enviar resposta de simulação:", e.message);
+      if (e.response) await notificarFalhaApiClaude(e, `Resposta de simulação de crédito (${telefoneCliente})`);
+    }
     return true;
   }
 
@@ -1223,27 +1388,32 @@ async function processarComandoConsultor(from, text) {
   if (!conversas[telefoneCliente]) conversas[telefoneCliente] = [];
   conversas[telefoneCliente].push({ role: "user", content: msgSistema });
 
-  const aprendizadosExtra = await obterAprendizados();
-  const claude = await axios.post("https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-5",
-      max_tokens: 500,
-      system: SYSTEM_PROMPT(null, aprendizadosExtra, null, false),
-      messages: conversas[telefoneCliente]
-    },
-    { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-  );
+  try {
+    const aprendizadosExtra = await obterAprendizados();
+    const claude = await axios.post("https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 500,
+        system: SYSTEM_PROMPT(null, aprendizadosExtra, null, false),
+        messages: conversas[telefoneCliente]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
 
-  const reply = claude.data.content[0].text;
-  conversas[telefoneCliente].push({ role: "assistant", content: reply });
+    const reply = claude.data.content[0].text;
+    conversas[telefoneCliente].push({ role: "assistant", content: reply });
 
-  await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-    { messaging_product: "whatsapp", to: telefoneCliente, text: { body: reply } },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-  );
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: telefoneCliente, text: { body: reply } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
 
-  await salvarMensagem(telefoneCliente, "sara", reply);
-  console.log(`[Desconto] ${autorizado ? "✅ Autorizado" : "❌ Negado"} para ${telefoneCliente}`);
+    await salvarMensagem(telefoneCliente, "sara", reply);
+    console.log(`[Desconto] ${autorizado ? "✅ Autorizado" : "❌ Negado"} para ${telefoneCliente}`);
+  } catch (e) {
+    console.error("[Desconto] Erro ao gerar/enviar resposta:", e.message);
+    if (e.response) await notificarFalhaApiClaude(e, `Resposta após autorizar/negar desconto (${telefoneCliente})`);
+  }
   return true;
 }
 
@@ -1251,7 +1421,7 @@ async function processarComandoConsultor(from, text) {
 // PROCESSAMENTO PRINCIPAL
 // ─────────────────────────────────────────────
 
-async function processarMensagem(from, text) {
+async function processarMensagem(from, text, tentativasAnteriores = 0) {
   if (!text || typeof text !== "string") return;
 
   // Verifica se é comando do consultor
@@ -1259,6 +1429,7 @@ async function processarMensagem(from, text) {
 
   ultimaMensagemCliente[from] = Date.now();
   const primeiraVez = !ultimaNotificacao[from];
+  const ehRetry = tentativasAnteriores > 0;
 
   // Carregar histórico do Supabase se não tem em memória (após reinício/deploy)
   if (!conversas[from]) {
@@ -1278,10 +1449,19 @@ async function processarMensagem(from, text) {
     }
   }
 
-  conversas[from].push({ role: "user", content: text });
+  // Em retry, a mensagem já está salva no Supabase e, na maioria dos casos,
+  // já recuperada no histórico acima — então só adiciona ao array em
+  // memória se ela ainda não for a última entrada (evita duplicar).
+  const ultimaDoHistorico = conversas[from][conversas[from].length - 1];
+  const jaEstaNoHistorico = ultimaDoHistorico && ultimaDoHistorico.role === "user" && ultimaDoHistorico.content === text;
+  if (!jaEstaNoHistorico) {
+    conversas[from].push({ role: "user", content: text });
+  }
 
-  await salvarMensagem(from, "client", text);
-  notificarAugusto(from, text, primeiraVez).catch(() => {});
+  if (!ehRetry) {
+    await salvarMensagem(from, "client", text);
+    notificarAugusto(from, text, primeiraVez).catch(() => {});
+  }
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
@@ -1489,6 +1669,15 @@ async function processarMensagem(from, text) {
     }
   }
 
+  // Detecta ambiguidade: mais de um veículo do estoque bate com o texto do
+  // cliente (ex: 3 "Argo" diferentes). Nesse caso, a Sarah deve perguntar
+  // qual deles, em vez de responder de forma vaga ou escolher um sozinha.
+  let veiculosAmbiguos = null;
+  if (modeloBuscado) {
+    const candidatos = contarVeiculosAmbiguos(modeloBuscado, estoqueAtual);
+    if (candidatos.length > 1) veiculosAmbiguos = candidatos;
+  }
+
   // Fotos do estoque
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
@@ -1516,26 +1705,52 @@ async function processarMensagem(from, text) {
   const clienteAindaTemPendente = descontoPendente && descontoPendente.telefone === from;
 
   // Resposta principal — Sonnet
-  const claude = await axios.post("https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-5",
-      max_tokens: 500,
-      system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente),
-      messages: conversas[from]
-    },
-    { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
-  );
+  try {
+    const claude = await axios.post("https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 500,
+        system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente, veiculosAmbiguos),
+        messages: conversas[from]
+      },
+      { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
 
-  const reply = claude.data.content[0].text;
-  conversas[from].push({ role: "assistant", content: reply });
+    const reply = claude.data.content[0].text;
+    conversas[from].push({ role: "assistant", content: reply });
 
-  await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-    { messaging_product: "whatsapp", to: from, text: { body: reply } },
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-  );
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: from, text: { body: reply } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
 
-  console.log(`Resposta para ${from}: ${reply}`);
-  await salvarMensagem(from, "sara", reply);
+    console.log(`Resposta para ${from}: ${reply}`);
+    await salvarMensagem(from, "sara", reply);
+  } catch (e) {
+    console.error(`[Resposta principal] Erro ao gerar/enviar resposta para ${from}:`, e.message);
+    if (e.response) {
+      console.error("Detalhe:", JSON.stringify(e.response.data));
+      await notificarFalhaApiClaude(e, `Resposta principal ao cliente (${from})`);
+    }
+    // Em vez de simplesmente desistir, salva a mensagem como pendente para
+    // o job de retry tentar de novo automaticamente em alguns minutos —
+    // assim, quando o crédito da API for reposto, a Sarah retoma sozinha
+    // sem precisar que o cliente escreva de novo.
+    const tentativas = (tentativasAnteriores || 0) + 1;
+    if (tentativas <= MAX_TENTATIVAS_PENDENTE) {
+      try {
+        await supabase.from("mensagens_pendentes").insert({ telefone: from, texto: text, tentativas });
+        console.log(`[Retry] Mensagem de ${from} re-agendada para retry (tentativa ${tentativas}/${MAX_TENTATIVAS_PENDENTE})`);
+      } catch (e2) {
+        console.error("[Retry] Erro ao salvar pendente:", e2.message);
+      }
+      // Remove a mensagem que tinha sido empurrada no histórico em memória,
+      // para não duplicar o contexto quando o retry rodar de novo.
+      if (conversas[from]?.length) conversas[from].pop();
+    } else {
+      console.error(`[Retry] Desistindo após ${tentativas} tentativas para ${from}`);
+    }
+  }
 }
 
 async function processarFotosAgrupadas(from, analises) {
@@ -1602,6 +1817,31 @@ app.get("/testar-notificacao", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
+app.get("/testar-alerta-api", async (req, res) => {
+  // Rota de teste manual: simula um erro de crédito esgotado para
+  // verificar se a notificação chega corretamente no WhatsApp.
+  try {
+    const erroFake = { response: { status: 400, data: { error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } } } };
+    ultimoAlertaApiFalha = 0; // força o envio ignorando o cooldown, só para este teste
+    await notificarFalhaApiClaude(erroFake, "Teste manual via /testar-alerta-api");
+    res.json({ ok: true, mensagem: "Alerta de teste enviado ao WhatsApp do consultor" });
+  } catch (e) { res.json({ ok: false, erro: e.message }); }
+});
+app.get("/painel/pendentes", async (req, res) => {
+  // Lista mensagens aguardando retry automático — útil para acompanhar
+  // se ainda há clientes sem resposta por falha temporária da API.
+  try {
+    const { data } = await supabase.from("mensagens_pendentes").select("*").order("criado_em", { ascending: false }).limit(50);
+    res.json({ pendentes: data || [] });
+  } catch (e) { res.json({ pendentes: [], erro: e.message }); }
+});
+app.get("/testar-retry", async (req, res) => {
+  // Força o job de retry a rodar agora, sem esperar os 5 minutos do timer.
+  try {
+    await processarMensagensPendentes();
+    res.json({ ok: true, mensagem: "Job de retry executado manualmente" });
+  } catch (e) { res.json({ ok: false, erro: e.message }); }
+});
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === VERIFY_TOKEN) res.send(req.query["hub.challenge"]);
@@ -1636,7 +1876,7 @@ app.post("/webhook", async (req, res) => {
         const caption = msg.image?.caption || "";
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
-        const analise = await analisarImagem(msg.image.id, caption);
+        const analise = await analisarImagem(msg.image.id, caption, from);
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (analise) filaFotos[from].analises.push(analise);
         filaFotos[from].timer = setTimeout(async () => {
@@ -1693,13 +1933,17 @@ app.get("/painel", async (req, res) => {
             const tel = String(c.telefone || '');
             const msg = String(c.ultimaMensagem || '').substring(0, 60);
             const vei = String(c.veiculo || '');
+            const opcoesEstagio = estagios.map(e2 =>
+              '<option value="' + e2.id + '"' + (e2.id === est.id ? ' selected' : '') + '>' + e2.label + '</option>'
+            ).join('');
             return '<div style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
               '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
               (vei ? '<div style="font-size:11px;color:#f0a500;margin-top:3px">🚗 ' + vei + '</div>' : '') +
               '<div style="font-size:11px;color:#555;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
               '<div style="font-size:10px;color:#444;margin-top:3px">' + (c.tempoLabel || '') + '</div>' +
-              '<div style="margin-top:8px;display:flex;gap:6px">' +
+              '<div style="margin-top:8px;display:flex;gap:6px;align-items:center">' +
               '<a href="/painel/chat/' + tel + '" style="background:#1e2a1e;color:#81c784;padding:4px 10px;border-radius:5px;font-size:11px;text-decoration:none">💬 Chat</a>' +
+              '<select onchange="moverLead(\'' + tel + '\', this.value)" style="background:#1a1a1a;color:#ccc;border:1px solid #2a2a2a;border-radius:5px;font-size:11px;padding:3px 4px;flex:1">' + opcoesEstagio + '</select>' +
               '</div></div>';
           }).join('');
 
@@ -1714,249 +1958,4 @@ app.get("/painel", async (req, res) => {
 
     const html = '<!DOCTYPE html><html lang="pt-BR"><head>' +
       '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>Sarah CRM</title>' +
-      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}' +
-      'a{color:inherit}header{background:#111;border-bottom:1px solid #222;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0}' +
-      '.dot{width:8px;height:8px;background:#4caf50;border-radius:50%;display:inline-block;margin-right:6px;animation:p 2s infinite}' +
-      '@keyframes p{0%,100%{opacity:1}50%{opacity:.4}}' +
-      '.badge{background:#f0a500;color:#000;font-size:10px;padding:2px 7px;border-radius:8px;margin-left:6px;font-weight:700}' +
-      '.board{display:flex;gap:12px;padding:14px;overflow-x:auto;-webkit-overflow-scrolling:touch}' +
-      '</style></head><body>' +
-      '<header>' +
-      '<h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span>' +
-      (pendente ? '<span class="badge">💰 1 desconto</span>' : '') + '</h1>' +
-      '<div style="font-size:12px;color:#888"><span class="dot"></span>' + totalLeads + ' leads</div>' +
-      '</header>' +
-      '<div style="padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px">' +
-      '<a href="/painel" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">📋 Pipeline</a>' +
-      '<a href="/painel/lista" style="color:#888;font-size:12px;text-decoration:none">💬 Conversas</a>' +
-      '</div>' +
-      '<div class="board">' + colunasHtml + '</div>' +
-      '</body></html>';
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
-  } catch(e) {
-    res.send('<html><body style="background:#000;color:#f44;padding:20px;font-family:monospace">Erro: ' + e.message + '</body></html>');
-  }
-});
-
-
-app.get("/painel/lista", async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  try {
-    const conversas = await listarConversas();
-    let itens = conversas.map(c => {
-      const tel = String(c.from || '');
-      const msg = String(c.ultimaMensagem || '').substring(0, 60);
-      const hora = c.ultimaAtividade ? new Date(c.ultimaAtividade).toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit'}) : '';
-      return '<a href="/painel/chat/' + tel + '" style="display:block;padding:12px 16px;border-bottom:1px solid #141414;text-decoration:none;' + (c.naoLida > 0 ? 'border-left:3px solid #f44336' : '') + '">' +
-        '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + (c.naoLida > 0 ? ' <span style="background:#f44336;color:#fff;font-size:10px;padding:1px 5px;border-radius:8px">' + c.naoLida + '</span>' : '') + '</div>' +
-        '<div style="font-size:11px;color:#555;margin-top:2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
-        '<div style="font-size:10px;color:#444;margin-top:2px">' + hora + '</div>' +
-        '</a>';
-    }).join('');
-
-    const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conversas — Sarah CRM</title>' +
-      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}a{color:inherit}' +
-      'header{background:#111;border-bottom:1px solid #222;padding:12px 16px;position:sticky;top:0}' +
-      '.tabs{padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px}</style></head><body>' +
-      '<header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>' +
-      '<div class="tabs"><a href="/painel" style="color:#888;font-size:12px;text-decoration:none">📋 Pipeline</a>' +
-      '<a href="/painel/lista" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">💬 Conversas</a></div>' +
-      (itens || '<p style="padding:20px;color:#555">Nenhuma conversa</p>') +
-      '</body></html>';
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
-  } catch(e) {
-    res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
-  }
-});
-
-app.get("/painel/chat/:tel", async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  const tel = req.params.tel;
-  const erro = req.query.erro;
-  try {
-    const mensagens = await buscarMensagens(tel);
-    const numero = tel.replace(/\D/g, '');
-    const formatado = numero.length >= 12 ? '(' + numero.slice(2,4) + ') ' + numero.slice(4,9) + '-' + numero.slice(9) : tel;
-
-    let avisoErro = '';
-    if (erro === 'janela24h') {
-      avisoErro = '<div style="background:#3a1a00;color:#f0a500;padding:10px 14px;font-size:12px;border-bottom:1px solid #f0a500">⚠️ Não enviado: faz mais de 24h que o cliente não escreve. Use um template aprovado ou espere ele mandar mensagem.</div>';
-    } else if (erro === '1') {
-      avisoErro = '<div style="background:#3a0a0a;color:#f44336;padding:10px 14px;font-size:12px;border-bottom:1px solid #f44336">⚠️ Erro ao enviar a mensagem. Tente de novo.</div>';
-    }
-
-    let msgsHtml = mensagens.map(m => {
-      const tipo = m.tipo || 'client';
-      const texto = String(m.texto || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
-      const hora = m.criado_em ? new Date(m.criado_em).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
-      const alinha = tipo === 'client' ? 'flex-start' : 'flex-end';
-      const bg = tipo === 'client' ? '#1e1e1e' : tipo === 'sara' ? '#1a3a1a' : '#2a1a00';
-      const cor = tipo === 'client' ? '#ddd' : tipo === 'sara' ? '#b8e6b8' : '#f0c060';
-      const label = tipo === 'client' ? '👤 Cliente' : tipo === 'sara' ? '🤖 Sarah' : '⚡ Você';
-      return '<div style="display:flex;justify-content:' + alinha + ';margin-bottom:8px">' +
-        '<div style="max-width:82%">' +
-        '<div style="font-size:9px;color:#555;margin-bottom:2px;text-align:' + (tipo==='client'?'left':'right') + '">' + label + '</div>' +
-        '<div style="background:' + bg + ';color:' + cor + ';padding:8px 11px;border-radius:10px;font-size:13px;line-height:1.5">' + texto + '</div>' +
-        '<div style="font-size:9px;color:#444;margin-top:2px;text-align:' + (tipo==='client'?'left':'right') + '">' + hora + '</div>' +
-        '</div></div>';
-    }).join('');
-
-    const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + formatado + '</title>' +
-      '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}' +
-      'header{background:#111;border-bottom:1px solid #222;padding:10px 14px;display:flex;align-items:center;gap:10px;position:sticky;top:0}' +
-      '.msgs{padding:12px;min-height:70vh}' +
-      'form{position:sticky;bottom:0;background:#111;border-top:1px solid #1e1e1e;padding:10px 12px;display:flex;gap:8px}' +
-      'textarea{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:7px;color:#fff;padding:8px;font-size:13px;height:44px;font-family:inherit;resize:none}' +
-      'button{background:#f0a500;color:#000;border:none;border-radius:7px;padding:0 16px;font-size:13px;font-weight:700;cursor:pointer}</style></head><body>' +
-      '<header>' +
-      '<a href="/painel/lista" style="color:#f0a500;text-decoration:none;font-size:20px">←</a>' +
-      '<div><div style="font-size:14px;font-weight:600">' + formatado + '</div></div>' +
-      '</header>' +
-      avisoErro +
-      '<div class="msgs">' + (msgsHtml || '<p style="color:#555;text-align:center;padding:20px">Sem mensagens</p>') + '</div>' +
-      '<form action="/painel/enviar" method="POST">' +
-      '<input type="hidden" name="tel" value="' + tel + '">' +
-      '<textarea name="texto" placeholder="Enviar como Sarah..."></textarea>' +
-      '<button type="submit">→</button>' +
-      '</form>' +
-      '</body></html>';
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
-  } catch(e) {
-    res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
-  }
-});
-
-app.post("/painel/enviar", async (req, res) => {
-  const { tel, texto } = req.body;
-  console.log(`[Painel] Tentando enviar pra ${tel}: "${texto}"`);
-  if (tel && texto) {
-    try {
-      const resp = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-        { messaging_product: "whatsapp", to: tel, text: { body: texto } },
-        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-      );
-      console.log(`[Painel] ✅ Enviado! Resposta Meta:`, JSON.stringify(resp.data));
-      if (!conversas[tel]) conversas[tel] = [];
-      conversas[tel].push({ role: "assistant", content: texto });
-      await salvarMensagem(tel, "intervencao", texto);
-    } catch(e) {
-      console.error("[Painel] ❌ Erro enviar:", e.message);
-      if (e.response) console.error("[Painel] Detalhe Meta:", JSON.stringify(e.response.data));
-      const codigoMeta = e.response?.data?.error?.code;
-      // Código 131047 = fora da janela de 24h, precisa de template
-      if (codigoMeta === 131047) {
-        return res.redirect("/painel/chat/" + tel + "?erro=janela24h");
-      }
-      return res.redirect("/painel/chat/" + tel + "?erro=1");
-    }
-  } else {
-    console.log(`[Painel] ⚠️ Dados faltando — tel: ${tel}, texto: ${texto}`);
-  }
-  res.redirect("/painel/chat/" + tel);
-});
-
-
-app.get("/painel/mensagens/:from", async (req, res) => {
-  try { res.json({ mensagens: await buscarMensagens(req.params.from) }); } catch (e) { res.json({ mensagens: [] }); }
-});
-app.post("/painel/visualizar", (req, res) => {
-  const { from } = req.body;
-  if (from) conversasVisualizadas[from] = Date.now();
-  res.json({ ok: true });
-});
-app.post("/painel/intervencao", async (req, res) => {
-  const { from, texto } = req.body;
-  if (!from || !texto) return res.status(400).json({ erro: "Dados inválidos" });
-  try {
-    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-      { messaging_product: "whatsapp", to: from, text: { body: texto } },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-    );
-    if (!conversas[from]) conversas[from] = [];
-    conversas[from].push({ role: "assistant", content: texto });
-    await salvarMensagem(from, "intervencao", texto);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ erro: e.message }); }
-});
-app.post("/painel/aprendizado", async (req, res) => {
-  const { situacao, correcao } = req.body;
-  if (!situacao || !correcao) return res.status(400).json({ erro: "Dados inválidos" });
-  try { await salvarAprendizado(situacao, correcao); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ erro: e.message }); }
-});
-app.get("/painel/aprendizados", async (req, res) => {
-  try { res.json({ aprendizados: await buscarAprendizados() }); } catch (e) { res.json({ aprendizados: [] }); }
-});
-app.get("/painel/simulacoes", async (req, res) => {
-  try {
-    const { data } = await supabase.from("simulacoes_credito").select("*").order("criado_em", { ascending: false }).limit(50);
-    res.json({ simulacoes: data || [] });
-  } catch (e) { res.json({ simulacoes: [] }); }
-});
-app.get("/painel/custo", async (req, res) => {
-  try {
-    // Janela: mês atual (do dia 1 até agora)
-    const inicioMes = new Date();
-    inicioMes.setDate(1);
-    inicioMes.setHours(0, 0, 0, 0);
-
-    const { data: msgsCliente, count } = await supabase
-      .from("mensagens")
-      .select("id", { count: "exact" })
-      .eq("tipo", "client")
-      .gte("criado_em", inicioMes.toISOString());
-
-    const totalMensagensCliente = count || 0;
-
-    // Premissas de tokens médios por chamada (Sonnet resposta + Haiku extração)
-    const SONNET_INPUT_TOKENS = 2000;  // system prompt + histórico
-    const SONNET_OUTPUT_TOKENS = 150;
-    const HAIKU_INPUT_TOKENS = 300;
-    const HAIKU_OUTPUT_TOKENS = 50;
-
-    const SONNET_INPUT_PRICE = 3.00;   // USD por milhão de tokens
-    const SONNET_OUTPUT_PRICE = 15.00;
-    const HAIKU_INPUT_PRICE = 0.80;
-    const HAIKU_OUTPUT_PRICE = 4.00;
-
-    const custoSonnetInput = (totalMensagensCliente * SONNET_INPUT_TOKENS / 1_000_000) * SONNET_INPUT_PRICE;
-    const custoSonnetOutput = (totalMensagensCliente * SONNET_OUTPUT_TOKENS / 1_000_000) * SONNET_OUTPUT_PRICE;
-    const custoHaikuInput = (totalMensagensCliente * HAIKU_INPUT_TOKENS / 1_000_000) * HAIKU_INPUT_PRICE;
-    const custoHaikuOutput = (totalMensagensCliente * HAIKU_OUTPUT_TOKENS / 1_000_000) * HAIKU_OUTPUT_PRICE;
-
-    const custoTotalUSD = custoSonnetInput + custoSonnetOutput + custoHaikuInput + custoHaikuOutput;
-    const cotacaoUSDBRL = 5.50; // aproximada, atualizar conforme necessário
-
-    res.json({
-      periodo: `${inicioMes.toLocaleDateString("pt-BR")} até hoje`,
-      mensagensClienteMes: totalMensagensCliente,
-      custoEstimadoUSD: Number(custoTotalUSD.toFixed(2)),
-      custoEstimadoBRL: Number((custoTotalUSD * cotacaoUSDBRL).toFixed(2)),
-      observacao: "Estimativa baseada em tokens médios por mensagem. Valor real pode variar conforme tamanho do histórico e estoque."
-    });
-  } catch (e) {
-    res.json({ erro: e.message, mensagensClienteMes: 0, custoEstimadoUSD: 0, custoEstimadoBRL: 0 });
-  }
-});
-app.post("/painel/followup", async (req, res) => {
-  const { from, motivo, dias } = req.body;
-  if (!from || !motivo || !dias) return res.status(400).json({ erro: "Dados inválidos" });
-  try { await agendarFollowUp(from, motivo, null, dias); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ erro: e.message }); }
-});
-app.post("/painel/resolver", async (req, res) => {
-  const { from } = req.body;
-  if (conversas[from]) delete conversas[from];
-  if (from) conversasVisualizadas[from] = Date.now();
-  res.json({ ok: true });
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => console.log("Servidor na porta " + PORT));
+      '<title>Sarah CRM</title>'
