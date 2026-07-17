@@ -1,19 +1,22 @@
 /**
- * overlayVideoText.js (v3 — camadas agrupadas por janela de tempo)
+ * overlayVideoText.js (v4 — memória reduzida para caber em 512MB)
  * ---------------------------------------------------------
- * v1 usava drawtext do ffmpeg — falhou porque o binário do
- * ffmpeg-static não inclui libfreetype (sem suporte a drawtext).
- *
- * v2 passou a desenhar cada texto como PNG (via canvas) e usar o
- * filtro "overlay" do ffmpeg — funcionou, mas usava 5 camadas de
- * overlay full-frame (1080x1920) compostas em TODOS os frames do
- * vídeo inteiro, consumindo memória demais e derrubando o serviço
- * no Render (reinício por falta de memória).
- *
- * v3: agrupa todos os textos que aparecem na MESMA janela de tempo
- * numa única imagem PNG (ex: título+preço da abertura viram 1 PNG;
- * marca+contato do final viram outro PNG). Isso reduz de 5 camadas
- * de overlay para só 2, cortando bastante o consumo de memória.
+ * Histórico:
+ * v1: usava drawtext do ffmpeg — falhou, o binário do ffmpeg-static
+ *     não inclui libfreetype (sem suporte a drawtext).
+ * v2: passou a desenhar cada texto como PNG (via canvas) + filtro
+ *     "overlay" do ffmpeg — funcionou, mas usava 5 camadas de overlay
+ *     full-frame, consumindo memória demais.
+ * v3: agrupou os textos por janela de tempo, reduzindo de 5 para 2
+ *     camadas de overlay — ainda estourou 512MB de RAM no Render.
+ * v4: a causa real do estouro de memória era o encoder de vídeo
+ *     (libx264) usando "rc_lookahead=40" no preset "veryfast" — isso
+ *     mantém até 40 frames inteiros (1080x1920) na memória de uma vez,
+ *     facilmente 200-300MB sozinho. Trocado para preset "ultrafast"
+ *     (lookahead mínimo) e limitado a poucas threads — reduz o
+ *     consumo de memória do encoder drasticamente, ao custo de um
+ *     arquivo de vídeo final um pouco maior (sem perda perceptível
+ *     de qualidade para conteúdo de Reels/Stories).
  *
  * Requisitos (rodar no projeto do Sarah, no Render):
  *   npm install fluent-ffmpeg ffmpeg-static node-fetch @supabase/supabase-js canvas
@@ -51,11 +54,6 @@ async function downloadToTemp(url, suffix) {
   return tempPath;
 }
 
-/**
- * Agrupa textos com o mesmo [start, end] numa única "camada".
- * Recebe a lista original de overlays e devolve grupos:
- * [{ start, end, textos: [{text,color,fontSize,y}, ...] }, ...]
- */
 function agruparPorJanela(overlays) {
   const grupos = {};
   overlays.forEach((o) => {
@@ -66,10 +64,6 @@ function agruparPorJanela(overlays) {
   return Object.values(grupos);
 }
 
-/**
- * Gera um único PNG transparente contendo todos os textos de um grupo
- * (mesma janela de tempo), cada um na sua posição vertical.
- */
 function gerarPngGrupo(grupo) {
   const canvas = createCanvas(VIDEO_WIDTH, VIDEO_HEIGHT);
   const ctx = canvas.getContext('2d');
@@ -98,14 +92,10 @@ function gerarPngGrupo(grupo) {
 }
 
 /**
- * Função principal: baixa o vídeo simples, gera 1 PNG por janela de
- * tempo (agrupando textos), compõe com ffmpeg (overlay), sobe no
- * Supabase Storage, e retorna a URL pública.
- *
- * @param {string} videoUrl - URL do vídeo pronto (sem texto) vindo do JSON2Video
- * @param {Array}  overlays - lista de textos: { text, color, fontSize, y, start, end }
- * @param {string} outputFileName - nome do arquivo final, ex: "onix-2021-1234.mp4"
- * @returns {Promise<string>} URL pública do vídeo final no Supabase
+ * @param {string} videoUrl
+ * @param {Array}  overlays - { text, color, fontSize, y, start, end }
+ * @param {string} outputFileName
+ * @returns {Promise<string>} URL pública do vídeo final
  */
 async function applyTextOverlay(videoUrl, overlays, outputFileName) {
   const inputPath = await downloadToTemp(videoUrl, '.mp4');
@@ -136,7 +126,13 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
     pngPaths.forEach((p) => cmd.input(p));
     cmd
       .complexFilter(filterChain, 'vout')
-      .outputOptions(['-map', '0:a?', '-c:a', 'copy', '-preset', 'veryfast'])
+      .outputOptions([
+        '-map', '0:a?',
+        '-c:a', 'copy',
+        '-preset', 'ultrafast', // lookahead mínimo — principal economia de memória
+        '-threads', '2',
+        '-x264opts', 'rc-lookahead=10:ref=1', // limita ainda mais o buffer de frames em memória
+      ])
       .on('start', (c) => console.log('[ffmpeg] comando:', c))
       .on('stderr', (line) => console.log('[ffmpeg]', line))
       .on('error', (err) => reject(err))
