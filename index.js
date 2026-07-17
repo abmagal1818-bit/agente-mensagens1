@@ -6,6 +6,7 @@ const nodeCrypto = require("crypto");
 const multer = require("multer");
 const uploadMiddleware = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } });
 const { createClient } = require("@supabase/supabase-js");
+const { applyTextOverlay } = require("./overlayVideoText");
 const app = express();
 app.use(express.json({
   verify: (req, res, buf) => {
@@ -2834,7 +2835,31 @@ app.post("/notificar-lead", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
-
+// Aplica overlay de texto (título, preço, contato) sobre o vídeo simples
+// gerado pelo JSON2Video, usando ffmpeg localmente — evita os timeouts
+// que o JSON2Video apresenta ao combinar áudio + vários textos por cena.
+app.post("/overlay-video", async (req, res) => {
+  try {
+    const { videoUrl, titulo, preco, km, site, whatsSarah, outputFileName } = req.body;
+    if (!videoUrl || !outputFileName) {
+      return res.status(400).json({ success: false, error: "videoUrl e outputFileName são obrigatórios" });
+    }
+    const vermelho = "#E63946";
+    const overlays = [
+      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 28, y: "5%", start: 0, end: 12 },
+      { text: titulo || "", color: "#FFFFFF", fontSize: 48, y: "78%", start: 0, end: 2 },
+      { text: `${km || ""} • ${preco || ""}`, color: vermelho, fontSize: 36, y: "88%", start: 0, end: 2 },
+      { text: "Premium Automarcas", color: vermelho, fontSize: 50, y: "45%", start: 10, end: 12 },
+      { text: `Fale com a Sarah: ${whatsSarah || ""}`, color: "#FFFFFF", fontSize: 32, y: "60%", start: 10, end: 12 },
+    ];
+    const finalUrl = await applyTextOverlay(videoUrl, overlays, outputFileName);
+    console.log(`[Overlay] ✅ Vídeo final gerado: ${finalUrl}`);
+    res.json({ success: true, url: finalUrl });
+  } catch (err) {
+    console.error("[Overlay] Erro:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.post("/painel/alertas/visto", async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ erro: "ID inválido" });
