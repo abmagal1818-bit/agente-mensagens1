@@ -2845,12 +2845,11 @@ app.post("/overlay-video", async (req, res) => {
       return res.status(400).json({ success: false, error: "videoUrl e outputFileName são obrigatórios" });
     }
     const vermelho = "#E63946";
-    const overlays = [
-      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 28, y: "5%", start: 0, end: 12 },
-      { text: titulo || "", color: "#FFFFFF", fontSize: 48, y: "78%", start: 0, end: 2 },
-      { text: `${km || ""} • ${preco || ""}`, color: vermelho, fontSize: 36, y: "88%", start: 0, end: 2 },
-      { text: "Premium Automarcas", color: vermelho, fontSize: 50, y: "45%", start: 10, end: 12 },
-      { text: `Fale com a Sarah: ${whatsSarah || ""}`, color: "#FFFFFF", fontSize: 32, y: "60%", start: 10, end: 12 },
+const overlays = [
+      { text: titulo || "", color: vermelho, fontSize: 46, y: "26%", start: 0, end: 12 },
+      { text: "Completo", color: vermelho, fontSize: 32, y: "82%", start: 0, end: 12 },
+      { text: `Whats ${whatsSarah || ""}`, color: vermelho, fontSize: 32, y: "87%", start: 0, end: 12 },
+      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 28, y: "92%", start: 0, end: 12 },
     ];
     const finalUrl = await applyTextOverlay(videoUrl, overlays, outputFileName);
     console.log(`[Overlay] ✅ Vídeo final gerado: ${finalUrl}`);
