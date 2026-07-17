@@ -2852,7 +2852,6 @@ app.post("/overlay-video", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-});
 app.get("/debug-frame", async (req, res) => {
   try {
     const { videoUrl } = req.query;
