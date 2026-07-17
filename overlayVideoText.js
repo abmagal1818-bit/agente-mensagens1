@@ -38,7 +38,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // Caminho da fonte usada nos textos (ajuste se o arquivo estiver em outro lugar)
-const FONT_PATH = path.join(__dirname, 'fonts', 'Montserrat-Bold.ttf');
+const FONT_PATH = path.join(__dirname, 'Poppins-Bold.ttf');
 
 /**
  * Escapa caracteres especiais para o filtro drawtext do ffmpeg.
