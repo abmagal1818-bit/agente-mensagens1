@@ -2840,24 +2840,18 @@ app.post("/notificar-lead", async (req, res) => {
 // que o JSON2Video apresenta ao combinar áudio + vários textos por cena.
 app.post("/overlay-video", async (req, res) => {
   try {
-    const { videoUrl, titulo, preco, km, site, whatsSarah, outputFileName } = req.body;
+    const { videoUrl, titulo, site, whatsSarah, outputFileName } = req.body;
     if (!videoUrl || !outputFileName) {
       return res.status(400).json({ success: false, error: "videoUrl e outputFileName são obrigatórios" });
     }
-    const vermelho = "#E63946";
-const overlays = [
-      { text: titulo || "", color: vermelho, fontSize: 78, y: "26%", start: 0, end: 12 },
-      { text: "Completo", color: vermelho, fontSize: 46, y: "82%", start: 0, end: 12 },
-      { text: `Whats ${whatsSarah || ""}`, color: vermelho, fontSize: 46, y: "87%", start: 0, end: 12 },
-      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 38, y: "92%", start: 0, end: 12 },
-    ];
-    const finalUrl = await applyTextOverlay(videoUrl, overlays, outputFileName);
+    const finalUrl = await applyTextOverlay(videoUrl, { titulo, whatsSarah, site }, outputFileName);
     console.log(`[Overlay] ✅ Vídeo final gerado: ${finalUrl}`);
     res.json({ success: true, url: finalUrl });
   } catch (err) {
     console.error("[Overlay] Erro:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
+});
 });
 app.get("/debug-frame", async (req, res) => {
   try {
