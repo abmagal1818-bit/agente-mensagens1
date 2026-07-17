@@ -2846,10 +2846,10 @@ app.post("/overlay-video", async (req, res) => {
     }
     const vermelho = "#E63946";
 const overlays = [
-      { text: titulo || "", color: vermelho, fontSize: 46, y: "26%", start: 0, end: 12 },
-      { text: "Completo", color: vermelho, fontSize: 32, y: "82%", start: 0, end: 12 },
-      { text: `Whats ${whatsSarah || ""}`, color: vermelho, fontSize: 32, y: "87%", start: 0, end: 12 },
-      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 28, y: "92%", start: 0, end: 12 },
+      { text: titulo || "", color: vermelho, fontSize: 78, y: "26%", start: 0, end: 12 },
+      { text: "Completo", color: vermelho, fontSize: 46, y: "82%", start: 0, end: 12 },
+      { text: `Whats ${whatsSarah || ""}`, color: vermelho, fontSize: 46, y: "87%", start: 0, end: 12 },
+      { text: site || "premiumautomarcas.net.br", color: vermelho, fontSize: 38, y: "92%", start: 0, end: 12 },
     ];
     const finalUrl = await applyTextOverlay(videoUrl, overlays, outputFileName);
     console.log(`[Overlay] ✅ Vídeo final gerado: ${finalUrl}`);
