@@ -2859,6 +2859,49 @@ const overlays = [
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.get("/debug-frame", async (req, res) => {
+  try {
+    const { videoUrl } = req.query;
+    if (!videoUrl) return res.status(400).json({ error: "passe ?videoUrl=..." });
+
+    const ffmpeg = require('fluent-ffmpeg');
+    const ffmpegPath = require('ffmpeg-static');
+    ffmpeg.setFfmpegPath(ffmpegPath);
+    const os = require('os');
+    const path = require('path');
+    const fs = require('fs');
+    const fetch = require('node-fetch');
+
+    const inputPath = path.join(os.tmpdir(), `debug-${Date.now()}.mp4`);
+    const outputPath = path.join(os.tmpdir(), `debug-${Date.now()}.png`);
+
+    const r = await fetch(videoUrl);
+    fs.writeFileSync(inputPath, await r.buffer());
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .seekInput(3)
+        .frames(1)
+        .save(outputPath)
+        .on('end', resolve)
+        .on('error', reject);
+    });
+
+    const buffer = fs.readFileSync(outputPath);
+    const { error } = await supabase.storage
+      .from('veiculos')
+      .upload('Reels/debug-frame.png', buffer, { contentType: 'image/png', upsert: true });
+
+    fs.unlinkSync(inputPath);
+    fs.unlinkSync(outputPath);
+
+    if (error) throw error;
+    const { data } = supabase.storage.from('veiculos').getPublicUrl('Reels/debug-frame.png');
+    res.json({ success: true, url: data.publicUrl });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post("/painel/alertas/visto", async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ erro: "ID inválido" });
