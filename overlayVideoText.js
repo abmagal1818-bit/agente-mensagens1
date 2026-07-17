@@ -34,7 +34,7 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 // ----- Configuração do Supabase (mesmas credenciais que o Sarah já usa) -----
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // Caminho da fonte usada nos textos (ajuste se o arquivo estiver em outro lugar)
