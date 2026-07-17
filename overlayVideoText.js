@@ -90,7 +90,7 @@ function gerarPngGrupo(grupo) {
       yPos = Number(overlay.y) || VIDEO_HEIGHT / 2;
     }
 
-    ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.05));
+    ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.025));
     ctx.strokeStyle = 'rgba(0,0,0,0.55)';
     ctx.strokeText(overlay.text, MARGEM_X, yPos);
     ctx.fillStyle = overlay.color || '#E63946';
