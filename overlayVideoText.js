@@ -91,16 +91,16 @@ function gerarPngGrupo(grupo) {
     }
 
     ctx.shadowColor = 'rgba(0,0,0,0.8)';
-ctx.shadowBlur = 6;
-ctx.shadowOffsetX = 2;
-ctx.shadowOffsetY = 2;
-ctx.fillStyle = overlay.color || '#E63946';
-ctx.fillText(overlay.text, MARGEM_X, yPos);
-ctx.shadowColor = 'transparent'; // reseta pro próximo texto do grupo
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = overlay.color || '#E63946';
+    ctx.fillText(overlay.text, MARGEM_X, yPos);
+    ctx.shadowColor = 'transparent';
+  });
 
   return canvas.toBuffer('image/png');
 }
-
 /**
  * Função principal: baixa o vídeo simples, gera 1 PNG por janela de
  * tempo (agrupando textos), compõe com ffmpeg (overlay), sobe no
