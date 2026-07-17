@@ -1,19 +1,23 @@
 /**
- * overlayVideoText.js (v2 — usa canvas + overlay, não drawtext)
+ * overlayVideoText.js (v3 — camadas agrupadas por janela de tempo)
  * ---------------------------------------------------------
- * O binário do pacote ffmpeg-static não inclui suporte ao filtro
- * "drawtext" (depende de libfreetype, que fica de fora desses builds
- * por licença). Por isso, em vez de desenhar o texto direto no ffmpeg,
- * geramos cada texto como uma imagem PNG transparente (usando a
- * biblioteca "canvas", com controle total de fonte/cor/tamanho) e
- * usamos o filtro "overlay" do ffmpeg (básico, sempre disponível) para
- * colar essas imagens por cima do vídeo, no tempo certo.
+ * v1 usava drawtext do ffmpeg — falhou porque o binário do
+ * ffmpeg-static não inclui libfreetype (sem suporte a drawtext).
+ *
+ * v2 passou a desenhar cada texto como PNG (via canvas) e usar o
+ * filtro "overlay" do ffmpeg — funcionou, mas usava 5 camadas de
+ * overlay full-frame (1080x1920) compostas em TODOS os frames do
+ * vídeo inteiro, consumindo memória demais e derrubando o serviço
+ * no Render (reinício por falta de memória).
+ *
+ * v3: agrupa todos os textos que aparecem na MESMA janela de tempo
+ * numa única imagem PNG (ex: título+preço da abertura viram 1 PNG;
+ * marca+contato do final viram outro PNG). Isso reduz de 5 camadas
+ * de overlay para só 2, cortando bastante o consumo de memória.
  *
  * Requisitos (rodar no projeto do Sarah, no Render):
  *   npm install fluent-ffmpeg ffmpeg-static node-fetch @supabase/supabase-js canvas
- *
- * Precisa do arquivo de fonte já enviado ao repositório:
- *   Poppins-Bold.ttf (na raiz do projeto)
+ * Precisa do arquivo Poppins-Bold.ttf na raiz do projeto.
  * ---------------------------------------------------------
  */
 
@@ -35,7 +39,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const FONT_PATH = path.join(__dirname, 'Poppins-Bold.ttf');
 registerFont(FONT_PATH, { family: 'Poppins' });
 
-// Dimensões padrão do vídeo (formato "instagram-story" usado no JSON2Video)
 const VIDEO_WIDTH = 1080;
 const VIDEO_HEIGHT = 1920;
 
@@ -49,42 +52,55 @@ async function downloadToTemp(url, suffix) {
 }
 
 /**
- * Gera um PNG transparente do tamanho do vídeo, com o texto desenhado
- * na posição vertical indicada (centralizado horizontalmente).
- *
- * overlay: { text, color, fontSize, y }
- *   y pode ser "78%" (porcentagem da altura) ou um número em pixels.
+ * Agrupa textos com o mesmo [start, end] numa única "camada".
+ * Recebe a lista original de overlays e devolve grupos:
+ * [{ start, end, textos: [{text,color,fontSize,y}, ...] }, ...]
  */
-function gerarPngTexto(overlay) {
+function agruparPorJanela(overlays) {
+  const grupos = {};
+  overlays.forEach((o) => {
+    const chave = `${o.start}-${o.end}`;
+    if (!grupos[chave]) grupos[chave] = { start: o.start, end: o.end, textos: [] };
+    grupos[chave].textos.push(o);
+  });
+  return Object.values(grupos);
+}
+
+/**
+ * Gera um único PNG transparente contendo todos os textos de um grupo
+ * (mesma janela de tempo), cada um na sua posição vertical.
+ */
+function gerarPngGrupo(grupo) {
   const canvas = createCanvas(VIDEO_WIDTH, VIDEO_HEIGHT);
   const ctx = canvas.getContext('2d');
-
-  const fontSize = overlay.fontSize || 40;
-  ctx.font = `bold ${fontSize}px Poppins`;
-  ctx.fillStyle = overlay.color || '#FFFFFF';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  let yPos;
-  if (typeof overlay.y === 'string' && overlay.y.trim().endsWith('%')) {
-    yPos = VIDEO_HEIGHT * (parseFloat(overlay.y) / 100);
-  } else {
-    yPos = Number(overlay.y) || VIDEO_HEIGHT / 2;
-  }
+  grupo.textos.forEach((overlay) => {
+    const fontSize = overlay.fontSize || 40;
+    ctx.font = `bold ${fontSize}px Poppins`;
 
-  // Contorno preto leve, ajuda a legibilidade sobre fotos claras
-  ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.06));
-  ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-  ctx.strokeText(overlay.text, VIDEO_WIDTH / 2, yPos);
-  ctx.fillText(overlay.text, VIDEO_WIDTH / 2, yPos);
+    let yPos;
+    if (typeof overlay.y === 'string' && overlay.y.trim().endsWith('%')) {
+      yPos = VIDEO_HEIGHT * (parseFloat(overlay.y) / 100);
+    } else {
+      yPos = Number(overlay.y) || VIDEO_HEIGHT / 2;
+    }
+
+    ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.06));
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeText(overlay.text, VIDEO_WIDTH / 2, yPos);
+    ctx.fillStyle = overlay.color || '#FFFFFF';
+    ctx.fillText(overlay.text, VIDEO_WIDTH / 2, yPos);
+  });
 
   return canvas.toBuffer('image/png');
 }
 
 /**
- * Função principal: baixa o vídeo simples, gera um PNG por texto,
- * compõe tudo com ffmpeg (overlay, não drawtext), sobe o resultado
- * final no Supabase Storage, e retorna a URL pública.
+ * Função principal: baixa o vídeo simples, gera 1 PNG por janela de
+ * tempo (agrupando textos), compõe com ffmpeg (overlay), sobe no
+ * Supabase Storage, e retorna a URL pública.
  *
  * @param {string} videoUrl - URL do vídeo pronto (sem texto) vindo do JSON2Video
  * @param {Array}  overlays - lista de textos: { text, color, fontSize, y, start, end }
@@ -95,22 +111,21 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
   const inputPath = await downloadToTemp(videoUrl, '.mp4');
   const outputPath = path.join(os.tmpdir(), outputFileName);
 
-  // Gera um arquivo PNG temporário para cada texto
-  const pngPaths = overlays.map((overlay) => {
-    const buffer = gerarPngTexto(overlay);
+  const grupos = agruparPorJanela(overlays);
+
+  const pngPaths = grupos.map((grupo) => {
+    const buffer = gerarPngGrupo(grupo);
     const pngPath = path.join(os.tmpdir(), `text-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
     fs.writeFileSync(pngPath, buffer);
     return pngPath;
   });
 
-  // Monta a cadeia de filtros overlay, um por cima do outro, cada um
-  // aparecendo só na janela de tempo [start, end] definida no overlay.
   let filterChain = '';
   let lastLabel = '0:v';
-  overlays.forEach((overlay, i) => {
-    const inputIndex = i + 1; // input 0 é o vídeo, 1+ são os PNGs
-    const outLabel = i === overlays.length - 1 ? 'vout' : `v${i}`;
-    const enableExpr = `between(t\\,${overlay.start}\\,${overlay.end})`;
+  grupos.forEach((grupo, i) => {
+    const inputIndex = i + 1;
+    const outLabel = i === grupos.length - 1 ? 'vout' : `v${i}`;
+    const enableExpr = `between(t\\,${grupo.start}\\,${grupo.end})`;
     filterChain += `[${lastLabel}][${inputIndex}:v]overlay=enable='${enableExpr}'[${outLabel}];`;
     lastLabel = outLabel;
   });
@@ -121,7 +136,7 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
     pngPaths.forEach((p) => cmd.input(p));
     cmd
       .complexFilter(filterChain, 'vout')
-      .outputOptions(['-map', '0:a?', '-c:a', 'copy'])
+      .outputOptions(['-map', '0:a?', '-c:a', 'copy', '-preset', 'veryfast'])
       .on('start', (c) => console.log('[ffmpeg] comando:', c))
       .on('stderr', (line) => console.log('[ffmpeg]', line))
       .on('error', (err) => reject(err))
@@ -138,7 +153,6 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
       upsert: true,
     });
 
-  // limpeza dos arquivos temporários
   fs.unlinkSync(inputPath);
   fs.unlinkSync(outputPath);
   pngPaths.forEach((p) => { try { fs.unlinkSync(p); } catch (e) {} });
