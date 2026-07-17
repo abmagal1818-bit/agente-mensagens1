@@ -90,12 +90,13 @@ function gerarPngGrupo(grupo) {
       yPos = Number(overlay.y) || VIDEO_HEIGHT / 2;
     }
 
-    ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.025));
-    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.strokeText(overlay.text, MARGEM_X, yPos);
-    ctx.fillStyle = overlay.color || '#E63946';
-    ctx.fillText(overlay.text, MARGEM_X, yPos);
-  });
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+ctx.shadowBlur = 6;
+ctx.shadowOffsetX = 2;
+ctx.shadowOffsetY = 2;
+ctx.fillStyle = overlay.color || '#E63946';
+ctx.fillText(overlay.text, MARGEM_X, yPos);
+ctx.shadowColor = 'transparent'; // reseta pro próximo texto do grupo
 
   return canvas.toBuffer('image/png');
 }
