@@ -1,24 +1,19 @@
 /**
- * overlayVideoText.js
+ * overlayVideoText.js (v2 — usa canvas + overlay, não drawtext)
  * ---------------------------------------------------------
- * Adiciona textos (título, preço, contato, marca) por cima de
- * um vídeo já pronto (o slideshow simples gerado pelo JSON2Video,
- * SEM texto, só fotos + áudio) usando ffmpeg localmente.
- *
- * Por que isso existe:
- * O JSON2Video estava estourando o tempo de render quando o JSON
- * combinava áudio + vários elementos de texto por cena. Fotos+áudio
- * sozinhos renderizam rápido e de forma confiável. Este script pega
- * esse vídeo simples já pronto e "queima" o texto por cima localmente,
- * eliminando a dependência do JSON2Video para a parte de texto.
+ * O binário do pacote ffmpeg-static não inclui suporte ao filtro
+ * "drawtext" (depende de libfreetype, que fica de fora desses builds
+ * por licença). Por isso, em vez de desenhar o texto direto no ffmpeg,
+ * geramos cada texto como uma imagem PNG transparente (usando a
+ * biblioteca "canvas", com controle total de fonte/cor/tamanho) e
+ * usamos o filtro "overlay" do ffmpeg (básico, sempre disponível) para
+ * colar essas imagens por cima do vídeo, no tempo certo.
  *
  * Requisitos (rodar no projeto do Sarah, no Render):
- *   npm install fluent-ffmpeg ffmpeg-static node-fetch @supabase/supabase-js
+ *   npm install fluent-ffmpeg ffmpeg-static node-fetch @supabase/supabase-js canvas
  *
- * Também é necessário um arquivo de fonte .ttf no repositório, por
- * exemplo em ./fonts/Montserrat-Bold.ttf (baixe em fonts.google.com,
- * procure "Montserrat", baixe o peso Bold/700, e suba o arquivo .ttf
- * pro seu repositório do GitHub).
+ * Precisa do arquivo de fonte já enviado ao repositório:
+ *   Poppins-Bold.ttf (na raiz do projeto)
  * ---------------------------------------------------------
  */
 
@@ -28,98 +23,71 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { createCanvas, registerFont } = require('canvas');
 const { createClient } = require('@supabase/supabase-js');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ----- Configuração do Supabase (mesmas credenciais que o Sarah já usa) -----
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// Caminho da fonte usada nos textos (ajuste se o arquivo estiver em outro lugar)
 const FONT_PATH = path.join(__dirname, 'Poppins-Bold.ttf');
+registerFont(FONT_PATH, { family: 'Poppins' });
 
-/**
- * Escapa caracteres especiais para o filtro drawtext do ffmpeg.
- * Sem isso, dois-pontos, aspas simples e barras invertidas quebram o filtro.
- */
-function escapeDrawtext(text) {
-  return String(text)
-    .replace(/\\/g, '\\\\\\\\')
-    .replace(/:/g, '\\:')
-    .replace(/'/g, "\u2019") // troca aspas simples por aspas tipográficas, evita quebrar o filtro
-    .replace(/%/g, '\\%');
-}
+// Dimensões padrão do vídeo (formato "instagram-story" usado no JSON2Video)
+const VIDEO_WIDTH = 1080;
+const VIDEO_HEIGHT = 1920;
 
-/**
- * Converte uma cor hex (#E63946) para o formato aceito pelo ffmpeg (0xE63946).
- */
-function hexToFfmpegColor(hex) {
-  return '0x' + hex.replace('#', '');
-}
-
-/**
- * Baixa um arquivo de uma URL para um caminho temporário local.
- */
 async function downloadToTemp(url, suffix) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Falha ao baixar ${url}: ${res.status}`);
-  const tempPath = path.join(os.tmpdir(), `overlay-${Date.now()}${suffix}`);
+  const tempPath = path.join(os.tmpdir(), `overlay-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`);
   const buffer = await res.buffer();
   fs.writeFileSync(tempPath, buffer);
   return tempPath;
 }
 
 /**
- * Monta a string de filtros drawtext (um por overlay) para o ffmpeg.
+ * Gera um PNG transparente do tamanho do vídeo, com o texto desenhado
+ * na posição vertical indicada (centralizado horizontalmente).
  *
- * overlays: array de objetos:
- *   {
- *     text: "GM Onix Sedan 2021",
- *     color: "#E63946",          // hex
- *     fontSize: 48,
- *     y: "78%",                   // posição vertical, aceita "78%" ou número em px
- *     start: 0,                   // segundo em que o texto aparece
- *     end: 2                      // segundo em que o texto some
- *   }
+ * overlay: { text, color, fontSize, y }
+ *   y pode ser "78%" (porcentagem da altura) ou um número em pixels.
  */
-function buildDrawtextFilters(overlays) {
-  return overlays.map((o) => {
-    const escapedText = escapeDrawtext(o.text);
-    const color = hexToFfmpegColor(o.color || '#FFFFFF');
-    const fontSize = o.fontSize || 40;
+function gerarPngTexto(overlay) {
+  const canvas = createCanvas(VIDEO_WIDTH, VIDEO_HEIGHT);
+  const ctx = canvas.getContext('2d');
 
-    // Converte y em "%" para expressão ffmpeg baseada na altura do vídeo (h)
-    let yExpr;
-    if (typeof o.y === 'string' && o.y.trim().endsWith('%')) {
-      const pct = parseFloat(o.y) / 100;
-      yExpr = `h*${pct}`;
-    } else {
-      yExpr = o.y || '(h-text_h)/2';
-    }
+  const fontSize = overlay.fontSize || 40;
+  ctx.font = `bold ${fontSize}px Poppins`;
+  ctx.fillStyle = overlay.color || '#FFFFFF';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
-    const enableExpr = `between(t\\,${o.start}\\,${o.end})`;
+  let yPos;
+  if (typeof overlay.y === 'string' && overlay.y.trim().endsWith('%')) {
+    yPos = VIDEO_HEIGHT * (parseFloat(overlay.y) / 100);
+  } else {
+    yPos = Number(overlay.y) || VIDEO_HEIGHT / 2;
+  }
 
-    return (
-      `drawtext=fontfile='${FONT_PATH}'` +
-      `:text='${escapedText}'` +
-      `:fontcolor=${color}` +
-      `:fontsize=${fontSize}` +
-      `:x=(w-text_w)/2` +
-      `:y=${yExpr}` +
-      `:enable='${enableExpr}'` +
-      `:borderw=2:bordercolor=black@0.6` // leve contorno preto, ajuda a legibilidade sobre fotos claras
-    );
-  });
+  // Contorno preto leve, ajuda a legibilidade sobre fotos claras
+  ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.06));
+  ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+  ctx.strokeText(overlay.text, VIDEO_WIDTH / 2, yPos);
+  ctx.fillText(overlay.text, VIDEO_WIDTH / 2, yPos);
+
+  return canvas.toBuffer('image/png');
 }
 
 /**
- * Função principal: baixa o vídeo simples, aplica os textos por cima,
- * sobe o resultado final no Supabase Storage, e retorna a URL pública.
+ * Função principal: baixa o vídeo simples, gera um PNG por texto,
+ * compõe tudo com ffmpeg (overlay, não drawtext), sobe o resultado
+ * final no Supabase Storage, e retorna a URL pública.
  *
  * @param {string} videoUrl - URL do vídeo pronto (sem texto) vindo do JSON2Video
- * @param {Array}  overlays - lista de textos a aplicar (ver formato acima)
+ * @param {Array}  overlays - lista de textos: { text, color, fontSize, y, start, end }
  * @param {string} outputFileName - nome do arquivo final, ex: "onix-2021-1234.mp4"
  * @returns {Promise<string>} URL pública do vídeo final no Supabase
  */
@@ -127,13 +95,35 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
   const inputPath = await downloadToTemp(videoUrl, '.mp4');
   const outputPath = path.join(os.tmpdir(), outputFileName);
 
-  const filters = buildDrawtextFilters(overlays);
+  // Gera um arquivo PNG temporário para cada texto
+  const pngPaths = overlays.map((overlay) => {
+    const buffer = gerarPngTexto(overlay);
+    const pngPath = path.join(os.tmpdir(), `text-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+    fs.writeFileSync(pngPath, buffer);
+    return pngPath;
+  });
+
+  // Monta a cadeia de filtros overlay, um por cima do outro, cada um
+  // aparecendo só na janela de tempo [start, end] definida no overlay.
+  let filterChain = '';
+  let lastLabel = '0:v';
+  overlays.forEach((overlay, i) => {
+    const inputIndex = i + 1; // input 0 é o vídeo, 1+ são os PNGs
+    const outLabel = i === overlays.length - 1 ? 'vout' : `v${i}`;
+    const enableExpr = `between(t\\,${overlay.start}\\,${overlay.end})`;
+    filterChain += `[${lastLabel}][${inputIndex}:v]overlay=enable='${enableExpr}'[${outLabel}];`;
+    lastLabel = outLabel;
+  });
+  filterChain = filterChain.replace(/;$/, '');
 
   await new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .videoFilters(filters)
-      .outputOptions(['-c:a copy']) // mantém o áudio original sem reprocessar
-      .on('start', (cmd) => console.log('[ffmpeg] comando:', cmd))
+    const cmd = ffmpeg(inputPath);
+    pngPaths.forEach((p) => cmd.input(p));
+    cmd
+      .complexFilter(filterChain, 'vout')
+      .outputOptions(['-map', '0:a?', '-c:a', 'copy'])
+      .on('start', (c) => console.log('[ffmpeg] comando:', c))
+      .on('stderr', (line) => console.log('[ffmpeg]', line))
       .on('error', (err) => reject(err))
       .on('end', () => resolve())
       .save(outputPath);
@@ -151,6 +141,7 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
   // limpeza dos arquivos temporários
   fs.unlinkSync(inputPath);
   fs.unlinkSync(outputPath);
+  pngPaths.forEach((p) => { try { fs.unlinkSync(p); } catch (e) {} });
 
   if (uploadError) throw uploadError;
 
@@ -162,42 +153,3 @@ async function applyTextOverlay(videoUrl, overlays, outputFileName) {
 }
 
 module.exports = { applyTextOverlay };
-
-/**
- * ---------------------------------------------------------
- * EXEMPLO DE USO (rota Express a adicionar no backend do Sarah)
- * ---------------------------------------------------------
- *
- * const { applyTextOverlay } = require('./overlayVideoText');
- *
- * app.post('/overlay-video', async (req, res) => {
- *   try {
- *     const { videoUrl, titulo, preco, km, site, whatsSarah, outputFileName } = req.body;
- *     const vermelho = '#E63946';
- *
- *     const overlays = [
- *       { text: site, color: vermelho, fontSize: 28, y: '5%', start: 0, end: 12 },
- *       { text: titulo, color: '#FFFFFF', fontSize: 48, y: '78%', start: 0, end: 2 },
- *       { text: `${km} • ${preco}`, color: vermelho, fontSize: 36, y: '88%', start: 0, end: 2 },
- *       { text: 'Premium Automarcas', color: vermelho, fontSize: 50, y: '45%', start: 10, end: 12 },
- *       { text: `Fale com a Sarah: ${whatsSarah}`, color: '#FFFFFF', fontSize: 32, y: '60%', start: 10, end: 12 },
- *     ];
- *
- *     const finalUrl = await applyTextOverlay(videoUrl, overlays, outputFileName);
- *     res.json({ success: true, url: finalUrl });
- *   } catch (err) {
- *     console.error(err);
- *     res.status(500).json({ success: false, error: err.message });
- *   }
- * });
- *
- * ---------------------------------------------------------
- * COMO ISSO SE ENCAIXA NO SEU WORKFLOW DO N8N
- * ---------------------------------------------------------
- * 1. Code node monta o JSON só com fotos + áudio (sem texto) -> JSON2Video
- * 2. Wait + HTTP Request1 + If (já configurado hoje) esperam o status "done"
- * 3. NOVO PASSO: HTTP Request para POST https://agente-mensagens1.onrender.com/overlay-video
- *    enviando { videoUrl: <url do json2video>, titulo, preco, km, site, whatsSarah, outputFileName }
- * 4. Esse endpoint devolve a URL final do vídeo já com o texto, hospedado no seu Supabase
- * ---------------------------------------------------------
- */
