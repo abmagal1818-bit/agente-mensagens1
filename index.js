@@ -2833,7 +2833,23 @@ app.post("/notificar-lead", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
+app.post("/notificar-post-publicado", async (req, res) => {
+  try {
+    const { veiculo, instagram_ok, facebook_ok } = req.body;
 
+    const statusInsta = instagram_ok ? "✅" : "❌";
+    const statusFace = facebook_ok ? "✅" : "❌";
+
+    const msg = `🎬 *Reels publicado!*\n\n*Veículo:* ${veiculo || "Não informado"}\n\nInstagram: ${statusInsta}\nFacebook: ${statusFace}`;
+
+    await enviarTexto(NUMERO_AUGUSTO, msg);
+    console.log(`[PostPublicado] ✅ Notificação enviada: ${veiculo}`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[PostPublicado] Erro notificação:", e.message);
+    res.status(500).json({ erro: e.message });
+  }
+});
 app.post("/painel/alertas/visto", async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ erro: "ID inválido" });
