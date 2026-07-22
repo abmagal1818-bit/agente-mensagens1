@@ -344,6 +344,28 @@ function ehMensagemSimples(texto) {
   return simples.includes(t) || t.length < 8;
 }
 
+// Limpa qualquer resposta da IA antes de enviar ao cliente — remove tags
+// internas que porventura vazem ([Sistema:...], [instrução:...]) e headers
+// Markdown (#, ##...), que o WhatsApp não renderiza e apareceriam como
+// texto cru pro cliente (ex: "# Sarah - Premium Automarcas"). Usada em
+// TODOS os pontos que mandam resposta gerada pela IA direto ao cliente —
+// resposta principal, SIMULACAO, CONTRAPROPOSTA e AUTORIZO/NEGO — para
+// que nenhum desses fluxos fique sem essa proteção.
+function limparRespostaIA(texto) {
+  return String(texto)
+    .replace(/\[SOLICITAR_FOTOS:[^\]]*\]/gi, "")
+    .replace(/\[Sistema:[^\]]*\]/gi, "")
+    .replace(/\[instrução:[^\]]*\]/gi, "")
+    .replace(/\[instruction:[^\]]*\]/gi, "")
+    .replace(/^#{1,6}\s.*$/gm, "")
+    // WhatsApp usa *negrito* com UM asterisco, não **negrito** (Markdown
+    // padrão). Com dois, o cliente vê os asteriscos literalmente na tela
+    // em vez do texto em negrito. A IA usa **duplo** por hábito de
+    // Markdown mesmo sem instrução — converte para o formato correto.
+    .replace(/\*\*(.+?)\*\*/g, "*$1*")
+    .trim();
+}
+
 // ─────────────────────────────────────────────
 // SIMULAÇÃO DE CRÉDITO — COLETA DE DADOS
 // ─────────────────────────────────────────────
@@ -678,8 +700,15 @@ Texto: "${textos.slice(-5).join(" | ")}"`
 async function salvarMensagem(telefone, tipo, texto, wamid = null) {
   try {
     console.log(`[Supabase] Salvando: ${telefone} | ${tipo}`);
+    // "sara_fotos" e "client_foto" guardam um JSON estruturado (modelo +
+    // array de URLs de foto), não texto solto. Truncar em 500 chars corta
+    // o JSON no meio de uma URL — o JSON.parse no painel falha e as
+    // miniaturas somem, mostrando só um texto genérico no lugar, sem dar
+    // pra confirmar visualmente se as fotos foram realmente enviadas.
+    const tiposSemTruncamento = ["sara_fotos", "client_foto"];
+    const textoFinal = tiposSemTruncamento.includes(tipo) ? String(texto) : String(texto).substring(0, 500);
     const { data, error } = await supabase.from("mensagens").insert({
-      telefone, tipo, texto: String(texto).substring(0, 500), wamid, status_entrega: wamid ? "enviado" : null
+      telefone, tipo, texto: textoFinal, wamid, status_entrega: wamid ? "enviado" : null
     }).select("id").single();
     if (error) console.error("[Supabase] ❌ Erro insert:", error.message);
     else console.log(`[Supabase] ✅ Salvo: ${telefone} | ${tipo}`);
@@ -1677,7 +1706,7 @@ async function processarComandoConsultor(from, text) {
         { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
       );
 
-      const replySim = claudeSim.data.content[0].text;
+      const replySim = limparRespostaIA(claudeSim.data.content[0].text);
       conversas[telefoneCliente].push({ role: "assistant", content: replySim });
 
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -1745,7 +1774,7 @@ async function processarComandoConsultor(from, text) {
         { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
       );
 
-      const replyCP = claudeCP.data.content[0].text;
+      const replyCP = limparRespostaIA(claudeCP.data.content[0].text);
       conversas[telefoneClienteCP].push({ role: "assistant", content: replyCP });
 
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -1818,7 +1847,7 @@ async function processarComandoConsultor(from, text) {
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
 
-    const reply = claude.data.content[0].text;
+    const reply = limparRespostaIA(claude.data.content[0].text);
     conversas[telefoneCliente].push({ role: "assistant", content: reply });
 
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -1932,7 +1961,17 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
     if (estado.etapa === "nome") {
       const nomeDigitado = text.trim();
-      const parecePergunta = text.includes("?") || text.toLowerCase().startsWith("qual") || text.toLowerCase().startsWith("como") || text.toLowerCase().startsWith("quando") || text.toLowerCase().startsWith("quanto") || text.toLowerCase().startsWith("onde") || text.toLowerCase().startsWith("tem") || text.toLowerCase().startsWith("voc");
+      // Além de perguntas explícitas (com "?" ou começando por palavras
+      // interrogativas), bloqueia frases que claramente não são um nome:
+      // contêm dígito, ou palavras típicas de pergunta sobre financiamento
+      // ("entrada", "parcela", "restante" etc.) que um nome real nunca tem.
+      // Sem isso, uma frase como "Mais entrada deles como seria, restante
+      // parcelas" passava despercebida como nome válido — ela não começa
+      // com nenhuma das palavras interrogativas checadas nem tem "?".
+      const palavrasNaoNome = ["entrada", "parcela", "financi", "desconto", "preço", "preco", "valor", "restante", "seria", "quero", "queria", "gostaria", "consegue", "consigo"];
+      const temDigito = /\d/.test(nomeDigitado);
+      const contemPalavraNaoNome = palavrasNaoNome.some(p => nomeDigitado.toLowerCase().includes(p));
+      const parecePergunta = text.includes("?") || text.toLowerCase().startsWith("qual") || text.toLowerCase().startsWith("como") || text.toLowerCase().startsWith("quando") || text.toLowerCase().startsWith("quanto") || text.toLowerCase().startsWith("onde") || text.toLowerCase().startsWith("tem") || text.toLowerCase().startsWith("voc") || temDigito || contemPalavraNaoNome;
       if (nomeDigitado.split(/\s+/).length >= 2 && nomeDigitado.length >= 5 && !parecePergunta) {
         estado.nome = nomeDigitado;
         estado.etapa = "cpf";
@@ -1947,7 +1986,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       } else if (parecePergunta) {
         // Cliente fez uma pergunta antes de fornecer o nome — deixa a IA responder
         // e pede o nome novamente ao final
-        conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente fez uma pergunta antes de fornecer o nome. Responda a pergunta dele e no final lembre gentilmente de pedir o nome completo para continuar a simulação.]" });
+        conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente mandou algo que não é um nome completo válido (pode ser uma pergunta, um emoji, ou uma confirmação vaga). Se for uma pergunta de verdade, responda brevemente. Em QUALQUER caso, termine a mensagem pedindo o nome completo de novo — não mude de assunto. A ÚNICA coisa pendente aqui é o nome.]" });
       } else {
         const msg = "Pode me mandar seu nome completo, por favor? 😊";
         conversas[from].push({ role: "assistant", content: msg });
@@ -1986,7 +2025,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       } else {
         // Cliente mandou uma pergunta em vez do CPF — deixa a IA responder normalmente
         // e depois pede o CPF novamente ao final
-        conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente fez uma pergunta antes de fornecer o CPF. Responda a pergunta dele e no final lembre gentilmente de pedir o CPF para continuar a simulação.]" });
+        conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente mandou algo que não é um CPF válido (pode ser uma pergunta, um emoji, ou uma confirmação vaga). Se for uma pergunta de verdade, responda brevemente. Em QUALQUER caso, termine a mensagem pedindo o CPF de novo — não mude de assunto, não pergunte sobre financiamento, parcela ou orçamento. A ÚNICA coisa pendente aqui é o CPF.]" });
       }
     }
 
@@ -2114,8 +2153,8 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       const enviouComSucesso = await enviarFotosVeiculo(from, veiculo);
       if (enviouComSucesso) {
         const instrucaoFotos = resultadoFotos === "adicional"
-          ? `[Sistema: fotos adicionais do ${limparTexto(veiculo.modelo)} foram enviadas. Confirme o envio naturalmente.]`
-          : `[Sistema: fotos enviadas do ${limparTexto(veiculo.modelo)}. Confirme o envio e pergunte o que achou. Se o cliente também perguntou sobre financiamento ou troca, responda essas perguntas na mesma mensagem.]`;
+          ? `[Sistema: fotos adicionais do ${limparTexto(veiculo.modelo)} ${veiculo.ano || ""} foram enviadas. Confirme o envio naturalmente.]`
+          : `[Sistema: fotos enviadas do ${limparTexto(veiculo.modelo)} ${veiculo.ano || ""}. Confirme o envio e pergunte o que achou. IMPORTANTE: o sistema só enviou fotos DESSE veículo específico (${limparTexto(veiculo.modelo)} ${veiculo.ano || ""}) — se o cliente mencionou mais de um veículo/ano na mensagem, NÃO diga algo como "mandei as fotos dos dois", pois isso é falso. Confirme apenas o envio desse, e se notar que ele queria ver outro modelo/ano também, pergunte se quer que mande as fotos desse outro também. Se o cliente também perguntou sobre financiamento ou troca, responda essas perguntas na mesma mensagem.]`;
         conversas[from].push({ role: "user", content: instrucaoFotos });
         atualizarEstagio(from, "negociacao", limparTexto(veiculo.modelo)).catch(() => {});
       } else {
@@ -2229,12 +2268,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     // Remove qualquer tag interna que a IA possa ter gerado por engano
     // (ex: [SOLICITAR_FOTOS: ...], [Sistema: ...], [instrução: ...]).
     // Essas tags nunca devem aparecer na resposta final ao cliente.
-    const reply = replyRaw
-      .replace(/\[SOLICITAR_FOTOS:[^\]]*\]/gi, "")
-      .replace(/\[Sistema:[^\]]*\]/gi, "")
-      .replace(/\[instrução:[^\]]*\]/gi, "")
-      .replace(/\[instruction:[^\]]*\]/gi, "")
-      .trim();
+    const reply = limparRespostaIA(replyRaw);
     conversas[from].push({ role: "assistant", content: reply });
 
     const respMeta = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -3199,6 +3233,16 @@ app.post("/painel/iniciar-contato", async (req, res) => {
     }
     if (enviou) {
       console.log(`[Contato Manual] ✅ Template enviado para ${telefone} — ${veiculoTexto}`);
+      // Sem isso, o lead só aparecia no pipeline depois que o cliente
+      // respondesse algo (só aí o webhook cria a linha em "clientes") —
+      // mesmo já tendo recebido o template com sucesso. Agora cria o
+      // registro imediatamente, com o veículo já preenchido, para o
+      // consultor ver o contato no painel assim que dispara o template.
+      const textoRegistro = `[Template de contato manual enviado: ${veiculoTexto}]`;
+      await salvarMensagem(telefone, "intervencao", textoRegistro);
+      await atualizarEstagio(telefone, "quente", veiculoTexto);
+      if (!conversas[telefone]) conversas[telefone] = [];
+      conversas[telefone].push({ role: "assistant", content: textoRegistro });
       res.json({ ok: true });
     } else {
       console.error(`[Contato Manual] ❌ Falha ao enviar para ${telefone}`);
