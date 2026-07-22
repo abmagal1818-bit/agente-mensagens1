@@ -2862,7 +2862,22 @@ app.post("/notificar-lead", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
-
+// Rota chamada pelo n8n quando um Reels de veículo é publicado com sucesso
+// no Instagram/Facebook. Notifica o consultor no WhatsApp.
+app.post("/notificar-post-publicado", async (req, res) => {
+  try {
+    const { veiculo, instagram_ok, facebook_ok } = req.body;
+    const igOk = instagram_ok === true || instagram_ok === "true";
+    const fbOk = facebook_ok === true || facebook_ok === "true";
+    const msg = `🎬 *Reels publicado!*\nVeículo: *${veiculo || "não informado"}*\nInstagram: ${igOk ? "✅" : "❌"}\nFacebook: ${fbOk ? "✅" : "❌"}`;
+    await enviarTexto(NUMERO_AUGUSTO, msg);
+    console.log(`[Reels] ✅ Notificação de publicação enviada: ${veiculo}`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[Reels] Erro notificação:", e.message);
+    res.status(500).json({ erro: e.message });
+  }
+});
 app.post("/painel/alertas/visto", async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ erro: "ID inválido" });
