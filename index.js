@@ -2884,7 +2884,15 @@ app.get("/painel/alertas", async (req, res) => {
 app.post("/notificar-lead", async (req, res) => {
   try {
     const { nome, telefone, veiculo, portal, mensagem } = req.body;
-    if (!telefone) return res.status(400).json({ erro: "Telefone obrigatório" });
+    if (!telefone) {
+      // Log temporário de diagnóstico — o n8n está mandando esse request
+      // com telefone vazio de forma intermitente mesmo com os campos
+      // aparentemente corretos na pré-visualização do editor. Logar o
+      // body cru aqui mostra exatamente o que chegou de verdade, em vez
+      // de continuar adivinhando pela tela do n8n.
+      console.error("[Lead] ❌ Telefone ausente. Body recebido:", JSON.stringify(req.body));
+      return res.status(400).json({ erro: "Telefone obrigatório" });
+    }
     const numero = String(telefone).replace(/\D/g, "");
     const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : telefone;
     const linkWhatsApp = `https://wa.me/${numero}`;
