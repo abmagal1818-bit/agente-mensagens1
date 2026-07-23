@@ -1400,7 +1400,14 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
   const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
   const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
-  if (confirmacoesSimples.includes(t) && ultimaResposta.toLowerCase().includes("foto")) return true;
+  // Antes exigia frase EXATAMENTE igual a uma dessas ("quero sim"), então
+  // "Bom dia ótimo quero sim" não era reconhecida como confirmação — a
+  // Sarah nunca detectava o pedido, mas mesmo assim "confirmava" o envio
+  // de fotos que nunca aconteceu. Agora aceita a confirmação em qualquer
+  // mensagem curta que contenha uma dessas palavras (limite de tamanho
+  // evita falso positivo em mensagens longas não relacionadas).
+  const ehConfirmacaoCurta = t.length <= 30 && confirmacoesSimples.some(p => t === p || t.includes(p));
+  if (ehConfirmacaoCurta && ultimaResposta.toLowerCase().includes("foto")) return true;
   const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mandando foto", "vou enviar", "to mandando", "tô mandando"];
   if (naoEPedido.some(p => t.includes(p))) return false;
   const ePedido = [
@@ -2165,6 +2172,14 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       // fotos disponíveis além das já enviadas — instrui Sarah a ser honesta
       // em vez de inventar que mandou algo que não mandou.
       conversas[from].push({ role: "user", content: `[Sistema: o cliente está pedindo fotos internas ou adicionais do veículo, mas todas as fotos disponíveis já foram enviadas anteriormente. NÃO diga que vai mandar mais fotos nem que já mandou. Informe honestamente que as fotos disponíveis do anúncio já foram enviadas e sugira que o cliente venha pessoalmente para ver o interior, ou ofereça para o consultor tirar fotos específicas e enviar depois.]` });
+    } else {
+      // Cliente pediu fotos, mas o sistema não conseguiu identificar com
+      // certeza qual veículo do estoque ele quer ver (ou o veículo
+      // encontrado não tem fotos cadastradas). Sem essa instrução, esse
+      // caso ficava sem NENHUMA orientação pra IA — ela então "alucinava"
+      // e confirmava o envio de fotos que nunca foram enviadas de verdade,
+      // fazendo o cliente reclamar "cadê as fotos" depois.
+      conversas[from].push({ role: "user", content: `[Sistema: o cliente pediu fotos, mas não foi possível identificar com certeza qual veículo do estoque ele quer ver (ou o veículo identificado não tem fotos cadastradas). NÃO diga que mandou ou vai mandar fotos — nenhuma foto foi enviada. Pergunte educadamente qual veículo exatamente ele quer ver as fotos.]` });
     }
   }
 
