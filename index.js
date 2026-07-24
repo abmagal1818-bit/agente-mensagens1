@@ -2002,6 +2002,31 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       return;
     }
 
+        if (estado.etapa === "aguardando_veiculo") {
+                const veiculoConfirmado = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+                if (veiculoConfirmado) {
+                          estado.etapa = "nome";
+                          estado.veiculo = `${limparTexto(veiculoConfirmado.modelo)} ${veiculoConfirmado.ano || ""}`.trim();
+                          await salvarColetaCreditoPendente(from, estado);
+                          const msg = "Perfeito! Pra fazer a simulação preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?";
+                          conversas[from].push({ role: "assistant", content: msg });
+                          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+                                           { messaging_product: "whatsapp", to: from, text: { body: msg } },
+                                           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+                                                   );
+                          await salvarMensagem(from, "sara", msg);
+                          return;
+                }
+                const msg = "Sem problema! Me confirma qual carro do nosso estoque você quer financiar, que eu já sigo com a simulação. 😊";
+                conversas[from].push({ role: "assistant", content: msg });
+                await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+                                 { messaging_product: "whatsapp", to: from, text: { body: msg } },
+                                 { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+                                       );
+                await salvarMensagem(from, "sara", msg);
+                return;
+        }
+    
     if (estado.etapa === "nome") {
       const nomeDigitado = text.trim();
       // Além de perguntas explícitas (com "?" ou começando por palavras
@@ -2228,9 +2253,14 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   // o cliente não pediu fotos junto (fotos têm prioridade, e a resposta
   // da IA gerada depois já vai abordar o financiamento também).
   if (!coletaCredito[from] && !clientePedindoFotos && detectarInteresseFinanciamento(text, conversas[from])) {
-    coletaCredito[from] = { etapa: "nome" };
-    await salvarColetaCreditoPendente(from, coletaCredito[from]);
-    const msg = "Posso fazer uma simulação de crédito pra você! 😊 Pra isso preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?";
+        const veiculoParaFinanciar = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+        coletaCredito[from] = veiculoParaFinanciar
+                ? { etapa: "nome", veiculo: `${limparTexto(veiculoParaFinanciar.modelo)} ${veiculoParaFinanciar.ano || ""}`.trim() }
+                : { etapa: "aguardando_veiculo" };
+        await salvarColetaCreditoPendente(from, coletaCredito[from]);
+        const msg = veiculoParaFinanciar
+                ? "Posso fazer uma simulação de crédito pra você! 😊 Pra isso preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?"
+                : "Posso fazer uma simulação de crédito sim! 😊 Só me confirma antes: qual carro do nosso estoque você quer financiar?";
     conversas[from].push({ role: "assistant", content: msg });
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: from, text: { body: msg } },
