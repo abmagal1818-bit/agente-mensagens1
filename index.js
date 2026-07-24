@@ -1629,6 +1629,11 @@ ${formatarEstoque(modeloMencionado)}
 - Se o cliente perguntar algo que não está na descrição (ex: "é automático?"), e a descrição não mencionar isso, diga que vai confirmar com a equipe — NUNCA afirme ou negue com base em achismo ou conhecimento geral sobre o modelo.
 - Isso vale mesmo que você "saiba" que aquele modelo de carro geralmente vem com determinada característica — o que importa é o anúncio real do veículo específico em estoque, que pode ter uma versão diferente do usual.
 
+🚨 REGRA CRÍTICA — QUILOMETRAGEM RELATIVA À IDADE DO VEÍCULO:
+- NUNCA avalie a quilometragem de um veículo como "alta" ou "baixa" isoladamente, sem considerar a idade do carro. Calcule sempre: quilometragem ÷ (ano atual - ano de fabricação) = km rodados por ano em média.
+- Referência: até ~12.000-15.000 km/ano é uso normal a baixo. Acima disso é uso mais intenso. Exemplo: um carro de 2008 com 134.000 km rodou em média ~7.400 km/ano — isso é BAIXO pra idade do carro, não alto.
+- Se o cliente reclamar que a quilometragem de algum veículo está alta, faça essa conta (km ÷ idade do carro) antes de responder. Se a média for baixa ou normal pra idade do carro, explique isso educadamente ao cliente em vez de simplesmente concordar com a reclamação e emendar outras opções.
+
 ${veiculosAmbiguos && veiculosAmbiguos.length > 1 ? `🚨 AMBIGUIDADE DETECTADA — MAIS DE UM VEÍCULO NO ESTOQUE BATE COM O QUE O CLIENTE MENCIONOU:
 ${veiculosAmbiguos.map(v => `- ${limparTexto(v.modelo || "")} ${v.ano || ""} - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n")}
 NÃO escolha um desses sozinha nem responda com um preço genérico. Liste rapidamente as opções disponíveis (ano/versão) e pergunte qual delas o cliente quer, ANTES de informar qualquer preço.` : ""}
