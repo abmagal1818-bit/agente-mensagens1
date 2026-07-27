@@ -581,6 +581,44 @@ function detectarPedidoDesconto(texto) {
 // PERSISTÊNCIA DO DESCONTO PENDENTE (sobrevive a reinícios)
 // ─────────────────────────────────────────────
 
+let avaliacaoPendente = null;
+
+async function salvarAvaliacaoPendente(telefone, info) {
+  avaliacaoPendente = { telefone, info, timestamp: Date.now() };
+  try {
+    await supabase.from("avaliacoes_pendentes").delete().neq("telefone", "");
+    await supabase.from("avaliacoes_pendentes").insert({ telefone, info: JSON.stringify(info) });
+  } catch (e) {
+    console.error("[Avaliação] Erro ao persistir (tabela pode não existir ainda):", e.message);
+  }
+}
+
+async function limparAvaliacaoPendente() {
+  avaliacaoPendente = null;
+  try {
+    await supabase.from("avaliacoes_pendentes").delete().neq("telefone", "");
+  } catch (e) {
+    console.error("[Avaliação] Erro ao limpar persistência:", e.message);
+  }
+}
+
+async function carregarAvaliacaoPendente() {
+  if (avaliacaoPendente) return avaliacaoPendente;
+  try {
+    const { data } = await supabase.from("avaliacoes_pendentes").select("*").limit(1);
+    if (data && data.length > 0) {
+      avaliacaoPendente = {
+        telefone: data[0].telefone,
+        info: typeof data[0].info === "string" ? JSON.parse(data[0].info) : data[0].info,
+        timestamp: new Date(data[0].criado_em || Date.now()).getTime()
+      };
+    }
+  } catch (e) {
+    console.error("[Avaliação] Erro ao carregar persistência:", e.message);
+  }
+  return avaliacaoPendente;
+}
+
 async function salvarDescontoPendente(telefone, info) {
   descontoPendente = { telefone, info, timestamp: Date.now() };
   try {
@@ -1351,14 +1389,23 @@ async function consultarFipe(marca, modelo, ano) {
     const marcaFipe = marcas.find(m => m.nome.toLowerCase().includes(marca.toLowerCase()) || marca.toLowerCase().includes(m.nome.toLowerCase().split(" ")[0]));
     if (!marcaFipe) return null;
     const modelosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos`);
-    const candidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(modelo.toLowerCase().split(" ")[0]));
+    const palavrasModelo = modelo.toLowerCase().split(" ").filter(p => p.length > 1);
+    let candidatos = modelosRes.data.modelos.filter(m => palavrasModelo.every(p => m.nome.toLowerCase().includes(p)));
+    let _fipeIncerto = false;
+    if (!candidatos.length) {
+      candidatos = modelosRes.data.modelos.filter(m => m.nome.toLowerCase().includes(palavrasModelo[0]));
+      _fipeIncerto = true;
+    }
+    if (candidatos.length > 1) _fipeIncerto = true;
     if (!candidatos.length) return null;
     for (const c of candidatos) {
       const anosRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${c.codigo}/anos`);
       const anoFipe = anosRes.data.find(a => a.nome.includes(ano.toString()) && !a.nome.includes("32000"));
       if (anoFipe) {
         const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${c.codigo}/anos/${anoFipe.codigo}`);
-        fipeCache[chave] = valorRes.data;
+        valorRes.data._incerto = _fipeIncerto;
+    valorRes.data._candidatos = candidatos.map(x => x.nome).slice(0, 5);
+    fipeCache[chave] = valorRes.data;
         console.log(`✅ FIPE: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
         return valorRes.data;
       }
@@ -1579,7 +1626,7 @@ function formatarEstoque(modeloFiltro = null) {
   ).join("\n");
 }
 
-const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null, modeloMencionado = null) => {
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null, modeloMencionado = null, versaoIncerta = null) => {
   const agora = new Date();
   const dataHoraAtual = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   return `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -1663,7 +1710,7 @@ PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórci
 Etapa 1: km, estado geral, revisões, fotos 📸
 - Se o sistema já forneceu uma [Análise de foto] com informações sobre estado geral, pontos positivos ou pontos de atenção do veículo, APROVEITE essas informações. NÃO pergunte de novo sobre algo que a análise da foto já respondeu (ex: não pergunte "como está o estado geral?" se a análise já descreveu o estado). Pergunte apenas o que ainda falta (tipicamente: quilometragem, se não tiver sido informada).
 Etapa 2: Agradeça as fotos
-Etapa 3 (só após tudo): ${fipeInfo ? (() => { const v = calcularValoresTroca(fipeInfo.Valor); return `"Conseguimos trabalhar entre R$ ${v.minimoFormatado} e R$ ${v.maximoFormatado} na troca. Avaliação final é presencial!" NÃO mencione FIPE.`; })() : "NUNCA invente valores de troca."}
+Etapa 3 (só após tudo): ${versaoIncerta ? `Encontramos mais de uma versão possível pro carro do cliente (${versaoIncerta.modelo}${versaoIncerta.candidatos && versaoIncerta.candidatos.length ? ": " + versaoIncerta.candidatos.slice(0,4).join(", ") : ""}). Pergunte a ele qual é a versão exata antes de continuar. NÃO dê nenhum valor de troca ainda.` : fipeInfo ? `Já temos os dados pra avaliação. Diga que vai confirmar uma coisa rapidinho e já retorna (algo como "Deixa eu confirmar uma coisa aqui rapidinho e já te retorno!"). NÃO dê nenhum valor de troca nessa mensagem — o consultor confirma antes.` : "NUNCA invente valores de troca."}
 
 QUANDO ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
 QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
@@ -1697,7 +1744,7 @@ async function processarComandoConsultor(from, text) {
   // Ignora mensagens que não são comandos conhecidos do consultor
   const ehComando = t === "PENDENCIAS" || t === "AUTORIZO" || t === "NEGO" ||
     t.startsWith("AUTORIZO ") || t.startsWith("NEGO ") || /^SIMULA[CÇ][AÃ]O\s/i.test(text) ||
-    /^CONTRAPROPOSTA\s/i.test(text);
+    /^CONTRAPROPOSTA\s/i.test(text) || t.startsWith("TROCA ") || t === "DEVOLVER";
   if (!ehComando) return false;
 
   await carregarDescontoPendente();
@@ -1762,6 +1809,95 @@ async function processarComandoConsultor(from, text) {
     } catch (e) {
       console.error("[Crédito] Erro ao gerar/enviar resposta de simulação:", e.message);
       if (e.response) await notificarFalhaApiClaude(e, `Resposta de simulação de crédito (${telefoneCliente})`);
+    }
+    return true;
+  }
+
+  // Comando TROCA [valor] — consultor confirma a avaliação de troca
+  // pendente com um valor específico. Libera a Sarah pra informar esse
+  // valor ao cliente (ela nunca fala esse valor sozinha).
+  const matchTroca = text.match(/^TROCA\s+([\s\S]+)/i);
+  if (matchTroca) {
+    const valorTroca = matchTroca[1].trim();
+    await carregarAvaliacaoPendente();
+    if (!avaliacaoPendente) {
+      await enviarTexto(NUMERO_AUGUSTO, "⚠️ Nenhuma avaliação de troca pendente no momento.");
+      return true;
+    }
+    const telefoneAv = avaliacaoPendente.telefone;
+    await limparAvaliacaoPendente();
+    const registroTroca = `[Sistema: o consultor confirmou a avaliação de troca em R$ ${valorTroca}. Informe esse valor ao cliente de forma natural, como o valor que conseguimos na troca do carro dele. NÃO mencione FIPE.]`;
+    await salvarMensagem(telefoneAv, "sistema", registroTroca);
+    if (!conversas[telefoneAv]) {
+      const msgsAv = await buscarMensagens(telefoneAv);
+      conversas[telefoneAv] = msgsAv.slice(-20).map(m => ({
+        role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant",
+        content: m.texto || ""
+      }));
+    }
+    conversas[telefoneAv].push({ role: "user", content: registroTroca });
+    try {
+      const aprendizadosExtraTr = await obterAprendizados();
+      const claudeTr = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        {
+          model: "claude-sonnet-4-5",
+          max_tokens: 500,
+          system: SYSTEM_PROMPT(null, aprendizadosExtraTr, null, false),
+          messages: conversas[telefoneAv]
+        },
+        { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+      );
+      const replyTr = limparRespostaIA(claudeTr.data.content[0].text);
+      conversas[telefoneAv].push({ role: "assistant", content: replyTr });
+      await enviarTexto(telefoneAv, replyTr);
+      await salvarMensagem(telefoneAv, "sara", replyTr);
+    } catch (e) {
+      console.error("[Troca] Erro ao gerar/enviar resposta de troca:", e.message);
+      if (e.response) await notificarFalhaApiClaude(e, `Resposta de troca (${telefoneAv})`);
+    }
+    return true;
+  }
+
+  // Comando DEVOLVER — consultor prefere não confirmar um valor de troca
+  // agora; pede pra Sarah perguntar ao cliente quanto ele quer de volta.
+  if (t === "DEVOLVER") {
+    await carregarAvaliacaoPendente();
+    if (!avaliacaoPendente) {
+      await enviarTexto(NUMERO_AUGUSTO, "⚠️ Nenhuma avaliação de troca pendente no momento.");
+      return true;
+    }
+    const telefoneDv = avaliacaoPendente.telefone;
+    await limparAvaliacaoPendente();
+    const registroDevolver = `[Sistema: o consultor prefere não confirmar um valor de troca agora. Pergunte ao cliente quanto ele gostaria de receber de volta pelo carro dele, de forma natural.]`;
+    await salvarMensagem(telefoneDv, "sistema", registroDevolver);
+    if (!conversas[telefoneDv]) {
+      const msgsDv = await buscarMensagens(telefoneDv);
+      conversas[telefoneDv] = msgsDv.slice(-20).map(m => ({
+        role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant",
+        content: m.texto || ""
+      }));
+    }
+    conversas[telefoneDv].push({ role: "user", content: registroDevolver });
+    try {
+      const aprendizadosExtraDv = await obterAprendizados();
+      const claudeDv = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        {
+          model: "claude-sonnet-4-5",
+          max_tokens: 500,
+          system: SYSTEM_PROMPT(null, aprendizadosExtraDv, null, false),
+          messages: conversas[telefoneDv]
+        },
+        { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+      );
+      const replyDv = limparRespostaIA(claudeDv.data.content[0].text);
+      conversas[telefoneDv].push({ role: "assistant", content: replyDv });
+      await enviarTexto(telefoneDv, replyDv);
+      await salvarMensagem(telefoneDv, "sara", replyDv);
+    } catch (e) {
+      console.error("[Devolver] Erro ao gerar/enviar resposta:", e.message);
+      if (e.response) await notificarFalhaApiClaude(e, `Resposta devolver (${telefoneDv})`);
     }
     return true;
   }
@@ -2337,9 +2473,45 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
   // FIPE
   let fipeInfo = null;
+  let versaoIncerta = null;
   if (marcaTroca && modeloTroca && anoTroca) {
     fipeInfo = await consultarFipe(marcaTroca, modeloTroca, anoTroca);
+    if (fipeInfo && fipeInfo._incerto) {
+      versaoIncerta = { modelo: modeloTroca, candidatos: fipeInfo._candidatos || [] };
+      fipeInfo = null;
+    }
   }
+
+  await carregarAvaliacaoPendente();
+
+  // Se já temos um valor de FIPE confiável pro carro do cliente e ainda não
+  // avisamos o consultor sobre essa avaliação, segura a resposta: avisa o
+  // consultor e manda uma mensagem de espera pro cliente, sem informar
+  // nenhum valor até ele confirmar (comando TROCA [valor] ou DEVOLVER).
+  if (fipeInfo && !versaoIncerta) {
+    const jaTemPendenteMesmoCliente = avaliacaoPendente && avaliacaoPendente.telefone === from;
+    const jaAvisouConsultor = conversas[from] && conversas[from].some(m => m.content && m.content.includes("[Sistema: avaliação de troca enviada ao consultor"));
+    if (!jaTemPendenteMesmoCliente && !jaAvisouConsultor) {
+      const vTroca = calcularValoresTroca(fipeInfo.Valor);
+      await salvarAvaliacaoPendente(from, {
+        marca: marcaTroca, modelo: modeloTroca, ano: anoTroca,
+        modeloFipe: fipeInfo.Modelo, valorFipe: fipeInfo.Valor,
+        minimo: vTroca.minimoFormatado, maximo: vTroca.maximoFormatado
+      });
+      const msgConsultor = `🚗 *Avaliação de troca pendente*\nCliente: ${from}\nCarro do cliente: ${marcaTroca} ${modeloTroca} (${anoTroca})\nModelo usado na FIPE: ${fipeInfo.Modelo}\nValor FIPE: ${fipeInfo.Valor}\nFaixa sugerida (80-85%): R$ ${vTroca.minimoFormatado} a R$ ${vTroca.maximoFormatado}\n\nResponda:\nTROCA [valor] — pra usar esse valor na troca\nDEVOLVER — pra eu perguntar ao cliente quanto ele quer de volta`;
+      await enviarTexto(NUMERO_AUGUSTO, msgConsultor);
+      const msgEspera = "Deixa eu confirmar uma coisa aqui rapidinho e já te retorno! 😊";
+      await enviarTexto(from, msgEspera);
+      await salvarMensagem(from, "sara", msgEspera);
+      conversas[from].push({ role: "assistant", content: msgEspera });
+      conversas[from].push({ role: "user", content: "[Sistema: avaliação de troca enviada ao consultor, aguardando confirmação dele. Não dê nenhum valor de troca até ele responder.]" });
+      return;
+    }
+  }
+
+  // A partir daqui a Sarah nunca fala um valor de troca sozinha — ou já
+  // segurou a resposta acima, ou o consultor ainda não confirmou.
+  fipeInfo = null;
 
   const aprendizadosExtra = await obterAprendizados();
   const clienteAindaTemPendente = descontoPendente && descontoPendente.telefone === from;
@@ -2350,7 +2522,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       {
         model: "claude-sonnet-4-5",
         max_tokens: 500,
-        system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente, veiculosAmbiguos, modeloBuscado),
+        system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente, veiculosAmbiguos, modeloBuscado, versaoIncerta),
         messages: conversas[from].slice(-30)
       },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
