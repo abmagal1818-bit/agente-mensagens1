@@ -1983,7 +1983,7 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  const telefoneCliente = descontoPendente.telefone;
+  const telefoneCliente = descontoPendente.telefone; const valorSolicitado = descontoPendente.info && descontoPendente.info.preco_solicitado; const matchNego = negado ? text.match(/^NEGO\s+([\s\S]+)/i) : null; const valorMinimo = matchNego ? matchNego[1].trim() : null;
 
   // Confirma para o consultor
   await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -1997,14 +1997,14 @@ async function processarComandoConsultor(from, text) {
   // Salva registro permanente no Supabase como instrução de sistema
   // para Sarah nunca negar após reinício do servidor
   const registroDesconto = autorizado
-    ? `[Sistema: desconto AUTORIZADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já confirmou ao cliente que conseguimos a condição especial de R$ 70 mil. NUNCA negar que o desconto foi aprovado. Se o cliente perguntar, confirmar que sim, o desconto foi aprovado.]`
-    : `[Sistema: desconto NEGADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já informou ao cliente que o preço está firme.]`;
+    ? `[Sistema: desconto AUTORIZADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já confirmou ao cliente que conseguimos a condição especial${valorSolicitado ? ` de R$ ${valorSolicitado}` : " combinada"}. NUNCA negar que o desconto foi aprovado. Se o cliente perguntar, confirmar que sim, o desconto foi aprovado.]`
+    : `[Sistema: desconto NEGADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já informou ao cliente que o preço está firme${valorMinimo ? `, mas que o valor mínimo possível para esse veículo é R$ ${valorMinimo}` : ""}.]`;
   await salvarMensagem(telefoneCliente, "sistema", registroDesconto);
 
   // Retoma conversa com o cliente
   const msgSistema = autorizado
     ? `[Sistema: nosso consultor autorizou o desconto. Informe ao cliente que conseguimos fazer uma condição especial e tente fechar o negócio. Seja entusiasta mas natural!]`
-    : `[Sistema: nosso consultor não autorizou o desconto. Informe ao cliente que infelizmente o preço está firme, mas tente manter o interesse com outras vantagens como IPVA pago, facilidade de financiamento, etc. Não mencione nomes.]`;
+    : `[Sistema: nosso consultor não autorizou o desconto.${valorMinimo ? ` O valor mínimo que conseguimos fazer para esse veículo é R$ ${valorMinimo} — informe esse valor ao cliente como nossa melhor oferta.` : " Informe ao cliente que infelizmente o preço está firme, mas tente manter o interesse com outras vantagens como IPVA pago, facilidade de financiamento, etc."} Não mencione nomes.]`;
 
   if (!conversas[telefoneCliente]) {
     const msgsAN = await buscarMensagens(telefoneCliente);
