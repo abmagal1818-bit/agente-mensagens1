@@ -3191,6 +3191,86 @@ app.post("/notificar-post-publicado", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
+// ─────────────────────────────────────────────
+// ROTAS: STORIES AUTOMATICOS (agente agendado 2x/dia)
+// ─────────────────────────────────────────────
+// Adiciona sob app.use("/painel", exigirToken) -- ja protegidas pelo
+// mesmo middleware das outras rotas administrativas. O n8n chama essas
+// rotas passando ?token=PAINEL_TOKEN na URL, igual ja faz pra outras
+// integracoes do painel.
+const TEMPLATES_STORY = ["golf_fipe", "gol_completo", "ford_ka_negocio", "aircross_grid"];
+const DIAS_SEM_REPETIR = 5;
+function embaralhar(array) {
+  const a = [...array];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+app.get("/painel/stories/sortear-veiculos", async (req, res) => {
+  try {
+    const limiteData = new Date(Date.now() - DIAS_SEM_REPETIR * 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentes, error: erroRecentes } = await supabase
+      .from("stories_publicados")
+      .select("veiculo_id")
+      .gte("publicado_em", limiteData);
+    if (erroRecentes) throw erroRecentes;
+    const idsExcluidos = (recentes || []).map(r => r.veiculo_id).filter(Boolean);
+    let query = supabase
+      .from("veiculos")
+      .select("*")
+      .eq("status", "disponivel")
+      .eq("publicado", true);
+    if (idsExcluidos.length > 0) {
+      query = query.not("id", "in", `(${idsExcluidos.join(",")})`);
+    }
+    const { data: veiculos, error: erroVeiculos } = await query;
+    if (erroVeiculos) throw erroVeiculos;
+    let pool = veiculos || [];
+    if (pool.length < 4) {
+      const { data: todosDisponiveis } = await supabase
+        .from("veiculos")
+        .select("*")
+        .eq("status", "disponivel")
+        .eq("publicado", true);
+      const idsJaNoPool = new Set(pool.map(v => v.id));
+      const extras = (todosDisponiveis || []).filter(v => !idsJaNoPool.has(v.id));
+      pool = [...pool, ...embaralhar(extras)];
+    }
+    const sorteados = embaralhar(pool).slice(0, 4);
+    const modelosSorteados = embaralhar(TEMPLATES_STORY);
+    const resultado = sorteados.map((v, i) => ({
+      veiculo: v,
+      template: modelosSorteados[i % modelosSorteados.length],
+    }));
+    res.json({ ok: true, total: resultado.length, itens: resultado });
+  } catch (e) {
+    console.error("[Stories] Erro ao sortear veiculos:", e.message);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+app.post("/painel/stories/registrar", async (req, res) => {
+  try {
+    const { veiculo_id, modelo_usado, instagram_ok, facebook_ok, veiculo_titulo } = req.body;
+    if (!veiculo_id) return res.status(400).json({ ok: false, erro: "veiculo_id e obrigatorio" });
+    const igOk = instagram_ok === true || instagram_ok === "true";
+    const fbOk = facebook_ok === true || facebook_ok === "true";
+    const { error } = await supabase.from("stories_publicados").insert({
+      veiculo_id,
+      modelo_usado: modelo_usado || null,
+      instagram_ok: igOk,
+      facebook_ok: fbOk,
+    });
+    if (error) throw error;
+    const msg = `📸 *Story publicado!*\nVeiculo: *${veiculo_titulo || veiculo_id}*\nModelo: ${modelo_usado || "?"}\nInstagram: ${igOk ? "✅" : "❌"}\nFacebook: ${fbOk ? "✅" : "❌"}`;
+    await enviarTexto(NUMERO_AUGUSTO, msg);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[Stories] Erro ao registrar publicacao:", e.message);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
 app.post("/painel/alertas/visto", async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ erro: "ID inválido" });
