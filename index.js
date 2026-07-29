@@ -2362,32 +2362,49 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   const clientePedindoFotos = resultadoFotos && (!jaEnviouFotos || resultadoFotos === "adicional");
   if (clientePedindoFotos) {
     const veiculo = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+    // A partir daqui, a confirmação do que realmente aconteceu (fotos
+    // enviadas, falhou, ou veículo não identificado) é mandada DIRETO
+    // pelo código, sem passar pela geração livre do Sonnet — isso vinha
+    // falhando de forma recorrente: a IA "confirmava" envio de fotos que
+    // nunca saíram de verdade, mesmo com instrução explícita pra não
+    // fazer isso. Uma mensagem fixa e correta é mais importante aqui do
+    // que a naturalidade de combinar com outras perguntas na mesma resposta.
+    let msgFotos;
     if (veiculo?.fotos?.length > 0) {
       console.log(`[Fotos] Enviando ${veiculo.fotos.length} fotos do ${veiculo.modelo}`);
       const enviouComSucesso = await enviarFotosVeiculo(from, veiculo);
+      const modeloAno = `${limparTexto(veiculo.modelo)} ${veiculo.ano || ""}`.trim();
       if (enviouComSucesso) {
-        const instrucaoFotos = resultadoFotos === "adicional"
-          ? `[Sistema: fotos adicionais do ${limparTexto(veiculo.modelo)} ${veiculo.ano || ""} foram enviadas. Confirme o envio naturalmente.]`
-          : `[Sistema: fotos enviadas do ${limparTexto(veiculo.modelo)} ${veiculo.ano || ""}. Confirme o envio e pergunte o que achou. IMPORTANTE: o sistema só enviou fotos DESSE veículo específico (${limparTexto(veiculo.modelo)} ${veiculo.ano || ""}) — se o cliente mencionou mais de um veículo/ano na mensagem, NÃO diga algo como "mandei as fotos dos dois", pois isso é falso. Confirme apenas o envio desse, e se notar que ele queria ver outro modelo/ano também, pergunte se quer que mande as fotos desse outro também. Se o cliente também perguntou sobre financiamento ou troca, responda essas perguntas na mesma mensagem.]`;
-        conversas[from].push({ role: "user", content: instrucaoFotos });
+        msgFotos = `Mandei as fotos do ${modeloAno}! O que achou? 😊`;
         atualizarEstagio(from, "negociacao", limparTexto(veiculo.modelo)).catch(() => {});
       } else {
-        conversas[from].push({ role: "user", content: `[Sistema: tentativa de envio de fotos do ${limparTexto(veiculo.modelo)} falhou. NÃO diga que enviou fotos. Informe que está com instabilidade e peça para tentar novamente.]` });
+        msgFotos = `Opa, tive uma instabilidade agora tentando mandar as fotos do ${modeloAno}. Pode me pedir de novo daqui a pouco? 😅`;
       }
     } else if (resultadoFotos === "adicional") {
       // Cliente pediu fotos internas/adicionais mas o sistema não tem mais
-      // fotos disponíveis além das já enviadas — instrui Sarah a ser honesta
-      // em vez de inventar que mandou algo que não mandou.
-      conversas[from].push({ role: "user", content: `[Sistema: o cliente está pedindo fotos internas ou adicionais do veículo, mas todas as fotos disponíveis já foram enviadas anteriormente. NÃO diga que vai mandar mais fotos nem que já mandou. Informe honestamente que as fotos disponíveis do anúncio já foram enviadas e sugira que o cliente venha pessoalmente para ver o interior, ou ofereça para o consultor tirar fotos específicas e enviar depois.]` });
+      // fotos disponíveis além das já enviadas.
+      msgFotos = "As fotos disponíveis desse anúncio já foram todas enviadas! Se quiser, posso pedir pro nosso consultor tirar fotos específicas e te enviar depois, ou você pode vir pessoalmente conferir o interior. 😊";
     } else {
-      // Cliente pediu fotos, mas o sistema não conseguiu identificar com
-      // certeza qual veículo do estoque ele quer ver (ou o veículo
-      // encontrado não tem fotos cadastradas). Sem essa instrução, esse
-      // caso ficava sem NENHUMA orientação pra IA — ela então "alucinava"
-      // e confirmava o envio de fotos que nunca foram enviadas de verdade,
-      // fazendo o cliente reclamar "cadê as fotos" depois.
-      conversas[from].push({ role: "user", content: `[Sistema: o cliente pediu fotos, mas não foi possível identificar com certeza qual veículo do estoque ele quer ver (ou o veículo identificado não tem fotos cadastradas). NÃO diga que mandou ou vai mandar fotos — nenhuma foto foi enviada. Pergunte educadamente qual veículo exatamente ele quer ver as fotos.]` });
+      // Não foi possível identificar com certeza qual veículo do estoque
+      // o cliente quer ver (ou o veículo identificado não tem fotos).
+      msgFotos = "Qual veículo exatamente você quer ver as fotos? Me confirma o modelo pra eu te mandar certinho! 😊";
     }
+    conversas[from].push({ role: "assistant", content: msgFotos });
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: from, text: { body: msgFotos } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+    await salvarMensagem(from, "sara", msgFotos);
+
+    // Se a mensagem do cliente só pedia fotos, encerra aqui — mensagem
+    // única e limpa. Mas se ela também trazia outro assunto (financiamento,
+    // troca, ou uma pergunta explícita), deixa o fluxo normal continuar
+    // pra essa segunda parte ser respondida na mesma interação, em vez de
+    // obrigar o cliente a perguntar de novo. A confirmação de fotos em si
+    // continua garantida pelo código acima, não pela IA.
+    const temOutroAssunto = detectarInteresseFinanciamento(text, conversas[from]) || /\btroca\b|\btrocar\b/i.test(text) || text.includes("?");
+    if (!temOutroAssunto) return;
+    conversas[from].push({ role: "user", content: `[Sistema: a confirmação de envio de fotos já foi feita automaticamente na mensagem anterior. NÃO mencione fotos de novo nem repita essa confirmação. Responda apenas a outra parte da mensagem do cliente (financiamento, troca, preço, ou o que mais ele perguntou).]` });
   }
 
   // Detecta início de interesse em financiamento — só inicia coleta se
