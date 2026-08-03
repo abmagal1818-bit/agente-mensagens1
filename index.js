@@ -9,10 +9,6 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json({
   verify: (req, res, buf) => {
-    // Guarda o body raw (bytes originais) para validação HMAC do webhook.
-    // O HMAC é calculado sobre o payload exato que a Meta enviou, não sobre
-    // o objeto JS parseado — JSON.stringify(req.body) pode diferir do original
-    // em ordenação de chaves ou espaços, fazendo a assinatura não bater.
     req.rawBody = buf;
   }
 }));
@@ -36,8 +32,6 @@ app.get("/sw.js", (req, res) => {
 });
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "meu_token_verificacao";
-// Token de acesso para proteger rotas administrativas (/painel, /crm, etc).
-// IMPORTANTE: defina PAINEL_TOKEN no Render com um valor forte e secreto.
 const PAINEL_TOKEN = process.env.PAINEL_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
@@ -49,14 +43,6 @@ const NUMERO_AUGUSTO = process.env.NUMERO_AUGUSTO || "5551993716729";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-// ─────────────────────────────────────────────
-// AUTENTICAÇÃO DAS ROTAS ADMINISTRATIVAS
-// ─────────────────────────────────────────────
-// Sem isso, qualquer pessoa na internet que descobrisse a URL do painel
-// conseguia ver CPF, nome, telefone e conversas de todos os clientes, ou
-// mandar mensagens fingindo ser a Sarah. O token precisa ser passado uma
-// vez via query string (?token=...) — depois disso, fica salvo num cookie
-// por 30 dias, então não precisa repetir o token em cada clique.
 const COOKIE_NOME_TOKEN = "sarah_painel_auth";
 
 function exigirToken(req, res, next) {
@@ -78,9 +64,6 @@ function exigirToken(req, res, next) {
   return res.status(401).send("Acesso negado. Use o link com ?token=SEU_TOKEN para entrar.");
 }
 
-// Protege todas as rotas administrativas. O /webhook fica de fora
-// (precisa ser público para a Meta poder chamá-lo) e a raiz "/" também
-// (usada só como health-check simples, sem dados sensíveis).
 app.use("/painel", exigirToken);
 app.use("/crm", exigirToken);
 app.use("/followups", exigirToken);
@@ -98,12 +81,6 @@ console.log("SUPABASE_KEY:", SUPABASE_KEY ? "OK" : "VAZIA");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ─────────────────────────────────────────────
-// FUNÇÃO CENTRALIZADA DE ENVIO WHATSAPP (#12)
-// ─────────────────────────────────────────────
-// Antes, o padrão axios.post("https://graph.facebook.com/...") se repetia
-// 15+ vezes com a mesma estrutura. Centralizar aqui garante logging,
-// captura de wamid e tratamento de erro consistentes em todo o sistema.
 async function enviarWhatsApp(telefone, corpo) {
   const resp = await axios.post(
     `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -127,10 +104,6 @@ async function testarSupabase() {
 }
 testarSupabase();
 
-// Migração única: preenche ultima_mensagem_cliente para clientes que já
-// existiam antes desse campo ser adicionado, usando ultima_interacao como
-// proxy. Sem isso, clientes antigos nunca entram no radar do followup
-// mesmo que tenham sumido recentemente. Roda só uma vez na inicialização.
 (async () => {
   try {
     const { data } = await supabase.from("clientes")
@@ -156,16 +129,9 @@ let cacheMarcasFipe = null;
 const filaFotos = {};
 const ultimaNotificacao = {};
 const conversasVisualizadas = {};
-// Cache de contexto extraído por conversa — evita chamar Haiku toda mensagem.
-// Invalidado quando o cliente menciona um veículo diferente ou carro de troca novo.
 const cacheContextoConversa = {};
 const ultimaMensagemCliente = {};
 
-// Estado de coleta de dados para simulação de crédito
-// Persistido no Supabase (tabela coleta_credito_pendente) desde que o
-// risco de perda em reinício foi resolvido — igual já era feito para o
-// desconto pendente. O objeto em memória continua existindo como cache
-// rápido; a tabela é a fonte de verdade que sobrevive a reinícios.
 const coletaCredito = {};
 
 async function salvarColetaCreditoPendente(telefone, estado) {
@@ -186,9 +152,6 @@ async function limparColetaCreditoPendente(telefone) {
   }
 }
 
-// Carrega o estado da coleta do Supabase pra memória, se ainda não
-// estiver lá — chamado no início do processamento de cada mensagem do
-// cliente, pra sobreviver a reinícios do servidor no meio da coleta.
 async function carregarColetaCreditoPendente(telefone) {
   if (coletaCredito[telefone]) return coletaCredito[telefone];
   try {
@@ -198,49 +161,25 @@ async function carregarColetaCreditoPendente(telefone) {
       console.log(`[ColetaCredito] Recuperado da persistência: ${telefone}`);
     }
   } catch (e) {
-    // Tabela pode não existir ainda — não é crítico
   }
   return coletaCredito[telefone];
 }
 
-// Visitas agendadas aguardando confirmação: { telefone: timestamp_agendamento }
-// REMOVIDO: "visitasAgendadas" era um objeto só em memória (não persistido
-// no Supabase) que duplicava o controle de follow-up de "visita não
-// confirmada" — esse controle já existe de forma resiliente na tabela
-// "followups" via agendarFollowUpHoras() + processarFollowUpsPendentes().
-// Como vivia só em RAM, todo reinício do servidor apagava esse controle
-// silenciosamente, fazendo o follow-up de 2h nunca disparar para visitas
-// agendadas antes do reinício mais recente.
-
-// Desconto pendente: { telefone, info, timestamp }
-// Guarda apenas UM por vez (o mais recente)
 let descontoPendente = null;
 
-// Fila de processamento por telefone — evita race condition quando
-// o cliente manda 2+ mensagens em sequência rápida
 const filaProcessamento = {};
 
 async function processarMensagemNaFila(from, text, tentativasAnteriores = 0) {
-  // Se já existe processamento em andamento para esse número, encadeia
   const anterior = filaProcessamento[from] || Promise.resolve();
   const atual = anterior
-    .catch(() => {}) // não deixa erro anterior travar a fila
+    .catch(() => {})
     .then(() => processarMensagem(from, text, tentativasAnteriores));
   filaProcessamento[from] = atual;
   return atual;
 }
 
-// ─────────────────────────────────────────────
-// ALERTA DE FALHA DA API DA ANTHROPIC
-// ─────────────────────────────────────────────
-// Quando a chamada à API do Claude falha (ex: crédito esgotado, erro de
-// autenticação, rate limit), o cliente fica sem resposta e isso só era
-// percebido quando alguém notava a conversa parada. Esta função avisa
-// o consultor no WhatsApp pessoal assim que isso acontecer, com um
-// cooldown para não inundar de mensagens repetidas no mesmo problema.
-
 let ultimoAlertaApiFalha = 0;
-const COOLDOWN_ALERTA_API = 15 * 60 * 1000; // 15 minutos entre alertas repetidos
+const COOLDOWN_ALERTA_API = 15 * 60 * 1000;
 
 async function notificarFalhaApiClaude(erro, contexto = "") {
   const agora = Date.now();
@@ -275,16 +214,7 @@ async function notificarFalhaApiClaude(erro, contexto = "") {
   }
 }
 
-// ─────────────────────────────────────────────
-// RETRY AUTOMÁTICO DE MENSAGENS QUE FALHARAM
-// ─────────────────────────────────────────────
-// Quando a resposta principal (Sonnet) falha por erro de API (ex: crédito
-// esgotado), a mensagem do cliente fica sem resposta e antes ninguém
-// reprocessava automaticamente depois que o problema fosse resolvido.
-// Esta fila salva a mensagem como pendente e um job periódico tenta de
-// novo, sem precisar que o cliente escreva outra vez.
-
-const MAX_TENTATIVAS_PENDENTE = 6; // depois disso, desiste e só fica registrado
+const MAX_TENTATIVAS_PENDENTE = 6;
 
 async function salvarMensagemPendente(telefone, texto) {
   try {
@@ -302,9 +232,6 @@ async function processarMensagensPendentes() {
     if (!pendentes?.length) return;
     console.log(`[Retry] ${pendentes.length} mensagem(ns) pendente(s) para reprocessar`);
     for (const p of pendentes) {
-      // Descarta mensagens que excederam o limite de tentativas — evita
-      // loop infinito consumindo recursos indefinidamente para mensagens
-      // que nunca vão conseguir ser processadas (ex: cliente bloqueou).
       if ((p.tentativas || 0) >= MAX_TENTATIVAS) {
         console.log(`[Retry] Descartando mensagem de ${p.telefone} após ${p.tentativas} tentativas`);
         await supabase.from("mensagens_pendentes").delete().eq("id", p.id);
@@ -322,11 +249,8 @@ async function processarMensagensPendentes() {
   }
 }
 
-setInterval(processarMensagensPendentes, 5 * 60 * 1000); // tenta a cada 5 minutos
+setInterval(processarMensagensPendentes, 5 * 60 * 1000);
 
-// ─────────────────────────────────────────────
-// CACHE DE APRENDIZADOS
-// ─────────────────────────────────────────────
 let cacheAprendizados = "";
 let ultimoCarregamentoAprendizados = 0;
 
@@ -345,10 +269,6 @@ async function obterAprendizados() {
   } catch (e) { console.error("[Cache] Erro:", e.message); }
   return cacheAprendizados;
 }
-
-// ─────────────────────────────────────────────
-// UTILITÁRIOS
-// ─────────────────────────────────────────────
 
 function limparTexto(str) {
   if (!str) return "";
@@ -376,13 +296,6 @@ function ehMensagemSimples(texto) {
   return simples.includes(t) || t.length < 8;
 }
 
-// Limpa qualquer resposta da IA antes de enviar ao cliente — remove tags
-// internas que porventura vazem ([Sistema:...], [instrução:...]) e headers
-// Markdown (#, ##...), que o WhatsApp não renderiza e apareceriam como
-// texto cru pro cliente (ex: "# Sarah - Premium Automarcas"). Usada em
-// TODOS os pontos que mandam resposta gerada pela IA direto ao cliente —
-// resposta principal, SIMULACAO, CONTRAPROPOSTA e AUTORIZO/NEGO — para
-// que nenhum desses fluxos fique sem essa proteção.
 function limparRespostaIA(texto) {
   return String(texto)
     .replace(/\[SOLICITAR_FOTOS:[^\]]*\]/gi, "")
@@ -390,21 +303,12 @@ function limparRespostaIA(texto) {
     .replace(/\[instrução:[^\]]*\]/gi, "")
     .replace(/\[instruction:[^\]]*\]/gi, "")
     .replace(/^#{1,6}\s.*$/gm, "")
-    // WhatsApp usa *negrito* com UM asterisco, não **negrito** (Markdown
-    // padrão). Com dois, o cliente vê os asteriscos literalmente na tela
-    // em vez do texto em negrito. A IA usa **duplo** por hábito de
-    // Markdown mesmo sem instrução — converte para o formato correto.
     .replace(/\*\*(.+?)\*\*/g, "*$1*")
     .trim();
 }
 
-// ─────────────────────────────────────────────
-// SIMULAÇÃO DE CRÉDITO — COLETA DE DADOS
-// ─────────────────────────────────────────────
-
 function detectarInteresseFinanciamento(texto, historicoConversa) {
   const t = texto.toLowerCase();
-  // Não dispara se já está no meio de uma coleta
   const frases = [
     "preciso financiar", "quero financiar", "consigo financiar",
     "tenho crédito", "tenho credito", "será que consigo crédito",
@@ -413,10 +317,6 @@ function detectarInteresseFinanciamento(texto, historicoConversa) {
     "fazer financiamento", "simular financiamento", "simular crédito",
     "simular credito", "ver se aprova", "ver se passa", "análise de crédito",
     "analise de credito", "consultar meu nome", "consultar meu cpf",
-    // Variações mais naturais de pergunta sobre parcela/financiamento —
-    // adicionadas porque a Sarah estava calculando e informando valor de
-    // parcela sem coletar CPF quando o cliente perguntava de forma livre,
-    // em vez de usar uma das frases fixas acima.
     "quanto fica a parcela", "quanto fica parcelado", "quanto ficaria a parcela",
     "qual valor da parcela", "qual o valor da parcela", "valor da parcela",
     "quanto seria por mês", "quanto seria por mes", "quanto fica por mês",
@@ -432,8 +332,7 @@ function detectarInteresseFinanciamento(texto, historicoConversa) {
 function validarCPF(cpfTexto) {
   const cpf = String(cpfTexto).replace(/\D/g, "");
   if (cpf.length !== 11) return null;
-  if (/^(\d)\1{10}$/.test(cpf)) return null; // todos dígitos iguais
-  // Validação dos dígitos verificadores
+  if (/^(\d)\1{10}$/.test(cpf)) return null;
   let soma = 0;
   for (let i = 0; i < 9; i++) soma += parseInt(cpf[i]) * (10 - i);
   let resto = (soma * 10) % 11;
@@ -450,7 +349,6 @@ function validarCPF(cpfTexto) {
 function extrairDataNascimento(texto) {
   const t = texto.trim();
 
-  // Formato com separador: 01/01/1990, 01-01-1990, 01 01 1990
   const matchSeparado = t.match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{2,4})/);
   if (matchSeparado) {
     let [, dia, mes, ano] = matchSeparado;
@@ -463,7 +361,6 @@ function extrairDataNascimento(texto) {
     }
   }
 
-  // Formato colado sem separador: DDMMYYYY (8 dígitos) ou DDMMAA (6 dígitos)
   const apenasDigitos = t.replace(/\D/g, "");
   if (apenasDigitos.length === 8) {
     const dia = apenasDigitos.slice(0, 2);
@@ -488,12 +385,6 @@ function extrairDataNascimento(texto) {
   return null;
 }
 
-// Mascara o CPF para exibição, mantendo só os 3 primeiros e 2 últimos
-// dígitos visíveis (ex: 123.***.***-00). O CPF completo continua
-// disponível no Supabase para quando for de fato necessário confirmar
-// a identidade do cliente nas financeiras, mas não fica exposto em
-// mensagens de WhatsApp que podem ser vistas por terceiros (ex: se o
-// celular for compartilhado ou perdido).
 function mascararCPF(cpfFormatado) {
   if (!cpfFormatado) return cpfFormatado;
   const digitos = cpfFormatado.replace(/\D/g, "");
@@ -550,10 +441,6 @@ async function atualizarStatusSimulacao(telefone, resultado) {
   }
 }
 
-// ─────────────────────────────────────────────
-// DETECÇÃO DE PEDIDO DE DESCONTO
-// ─────────────────────────────────────────────
-
 function detectarPedidoDesconto(texto) {
   const t = texto.toLowerCase().trim();
   const frases = [
@@ -571,15 +458,10 @@ function detectarPedidoDesconto(texto) {
   ];
   const temValor = /r\$\s*[\d.,]+|[\d.,]+\s*mil|\d{4,}/.test(t);
   const temFrase = frases.some(f => t.includes(f));
-  // Detecta proposta direta: "69 a vista", "70 mil à vista", "ofereci 69"
   const temPropostaDireta = /\d{2,}\s*(mil|k)?\s*(a|à)\s*vista/i.test(t);
   const temOferta = /ofereci\s+\d|ofereço\s+\d|proponho\s+\d/.test(t);
   return (temFrase && temValor) || temPropostaDireta || temOferta || /em [5-9]\d/.test(t);
 }
-
-// ─────────────────────────────────────────────
-// PERSISTÊNCIA DO DESCONTO PENDENTE (sobrevive a reinícios)
-// ─────────────────────────────────────────────
 
 let avaliacaoPendente = null;
 
@@ -651,14 +533,12 @@ async function carregarDescontoPendente() {
       console.log(`[Desconto] Recuperado da persistência: ${descontoPendente.telefone}`);
     }
   } catch (e) {
-    // Tabela pode não existir ainda — não é crítico
   }
   return descontoPendente;
 }
 
 async function processarDesconto(from, texto, historicoConversa) {
   await carregarDescontoPendente();
-  // Se já tem desconto pendente para ESTE cliente, não dispara novamente
   if (descontoPendente && descontoPendente.telefone === from) return false;
   if (!detectarPedidoDesconto(texto)) return false;
 
@@ -684,10 +564,8 @@ Texto atual: "${texto}"`
     const jsonMatch = res.data.content[0].text.trim().match(/\{[\s\S]+\}/);
     const info = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
 
-    // Guarda o desconto pendente — agora persistido no Supabase também
     await salvarDescontoPendente(from, info);
 
-    // Notifica consultor
     const numero = from.replace(/\D/g, "");
     const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
     const msgConsultor = `💰 *Pedido de desconto*
@@ -714,13 +592,8 @@ Responda:
   }
 }
 
-// ─────────────────────────────────────────────
-// EXTRAÇÃO UNIFICADA — 1 chamada Haiku
-// ─────────────────────────────────────────────
-
 async function extrairContextoConversa(textos, ehSimples = false, from = null) {
   if (ehSimples) return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
-  // Cache por conversa: só rechama Haiku se o texto recente sugere novo veículo mencionado
   const textoRecente = textos.slice(-3).join(" ").toLowerCase();
   const cache = from ? cacheContextoConversa[from] : null;
   if (cache && !textoRecente.match(/\b(troca|trocar|vender|meu carro|minha|modelo|ano|[12][09]\d{2})\b/i)) {
@@ -763,18 +636,9 @@ Texto: "${textos.slice(-5).join(" | ")}"`
   }
 }
 
-// ─────────────────────────────────────────────
-// SUPABASE — MENSAGENS
-// ─────────────────────────────────────────────
-
 async function salvarMensagem(telefone, tipo, texto, wamid = null) {
   try {
     console.log(`[Supabase] Salvando: ${telefone} | ${tipo}`);
-    // "sara_fotos" e "client_foto" guardam um JSON estruturado (modelo +
-    // array de URLs de foto), não texto solto. Truncar em 500 chars corta
-    // o JSON no meio de uma URL — o JSON.parse no painel falha e as
-    // miniaturas somem, mostrando só um texto genérico no lugar, sem dar
-    // pra confirmar visualmente se as fotos foram realmente enviadas.
     const tiposSemTruncamento = ["sara_fotos", "client_foto"];
     const textoFinal = tiposSemTruncamento.includes(tipo) ? String(texto) : String(texto).substring(0, 500);
     const { data, error } = await supabase.from("mensagens").insert({
@@ -790,9 +654,6 @@ async function salvarMensagem(telefone, tipo, texto, wamid = null) {
   } catch (e) { console.error("[Supabase] ❌ Exceção:", e.message); return null; }
 }
 
-// Atualiza o status de entrega de uma mensagem já salva, a partir do
-// wamid recebido nos eventos de status que a Meta envia ao webhook
-// (sent, delivered, read, failed).
 async function atualizarStatusEntrega(wamid, novoStatus, motivoErro = null) {
   try {
     const update = { status_entrega: novoStatus };
@@ -805,12 +666,6 @@ async function atualizarStatusEntrega(wamid, novoStatus, motivoErro = null) {
 
 async function buscarMensagens(telefone) {
   try {
-    // Busca os 100 mais RECENTES (ordem decrescente + limit), depois
-    // reordena cronologicamente para exibição. Antes, o limit(100) vinha
-    // junto com ordem crescente, o que pegava sempre as 100 mensagens MAIS
-    // ANTIGAS de cada cliente — em conversas longas (100+ mensagens no
-    // total), as mensagens recentes nunca apareciam no painel, mesmo
-    // estando salvas corretamente no banco.
     const { data } = await supabase.from("mensagens").select("*").eq("telefone", telefone).order("criado_em", { ascending: false }).limit(100);
     return (data || []).reverse();
   } catch (e) { return []; }
@@ -834,18 +689,9 @@ async function listarConversas() {
   } catch (e) { return []; }
 }
 
-// ─────────────────────────────────────────────
-// CRM — ESTÁGIOS
-// ─────────────────────────────────────────────
-
 async function atualizarEstagio(telefone, estagio, veiculo = null) {
   try {
     const update = { telefone, estagio, ultima_interacao: new Date().toISOString() };
-    // Trunca para evitar que uma extração malformada (ex: Claude/Haiku
-    // "vazando" um trecho longo de texto em vez do nome do veículo) grave
-    // uma string gigante nessa coluna — isso já quebrou o envio do template
-    // de followup (erro 132005 "Translated text too long" na Meta, corpo
-    // final passando de 1024 caracteres).
     if (veiculo) update.veiculo_interesse = String(veiculo).slice(0, 100);
     const { error } = await supabase.from("clientes").upsert(update, { onConflict: "telefone" });
     if (!error) console.log(`[CRM] ${telefone} → ${estagio}`);
@@ -860,7 +706,6 @@ async function detectarEstagio(from, text, historico) {
     const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
     const jaEraVisita = clienteAtual?.[0]?.estagio === "visita_agendada";
     await atualizarEstagio(from, "visita_agendada");
-    // Notifica consultor apenas na primeira vez que agenda visita
     if (!jaEraVisita) {
       const numero = from.replace(/\D/g, "");
       const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
@@ -873,7 +718,6 @@ async function detectarEstagio(from, text, historico) {
         );
         console.log(`[Visita] ✅ Notificado sobre visita de ${from}`);
       } catch(e) { console.error("[Visita] Erro notificação:", e.message); }
-      // Agenda follow-up automático em 2h — só dispara se ninguém mudar o estágio antes
       await agendarFollowUpHoras(from, "visita_nao_confirmada", veiculo, 2);
     }
     return;
@@ -882,7 +726,15 @@ async function detectarEstagio(from, text, historico) {
   if (t.includes("não tenho interesse") || t.includes("desisti") || t.includes("esquece")) { await atualizarEstagio(from, "frio"); return; }
   if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) { await atualizarEstagio(from, "aguardando"); return; }
   const { data } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
-  if (!data?.[0]?.estagio) await atualizarEstagio(from, "quente");
+  const estagioAtual = data?.[0]?.estagio;
+  // Antes só marcava "quente" se o cliente nunca tivesse tido estágio salvo.
+  // Isso deixava um lead "frio" (por reativação/sumiço) preso nesse estágio
+  // pra sempre, mesmo depois de voltar a responder com algo comum ("oi",
+  // "bom dia") — e também impedia a régua de reativação de cancelar
+  // corretamente, já que ela depende desse estágio. Agora, se o cliente
+  // estava "frio" e mandou algo que não caiu em nenhuma regra de recusa
+  // acima, ele volta pra "quente".
+  if (!estagioAtual || estagioAtual === "frio") await atualizarEstagio(from, "quente");
 }
 
 async function buscarLeadsCRM() {
@@ -911,10 +763,6 @@ async function buscarLeadsCRM() {
   } catch (e) { console.error("[CRM] Erro:", e.message); return {}; }
 }
 
-// ─────────────────────────────────────────────
-// SUPABASE — APRENDIZADOS
-// ─────────────────────────────────────────────
-
 async function salvarAprendizado(situacao, correcao) {
   try {
     await supabase.from("aprendizados").insert({ situacao, correcao });
@@ -929,20 +777,23 @@ async function buscarAprendizados() {
   } catch (e) { return []; }
 }
 
-// ─────────────────────────────────────────────
-// FOLLOW-UPS
-// ─────────────────────────────────────────────
-
-async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar) {
+// Parâmetro "nivel" (default 1) suporta a régua de reativação em múltiplos
+// toques (D+2 / D+4 / D+7) para leads que pararam de responder (motivo
+// "sumiu"). Os demais motivos continuam com disparo único, como antes.
+// O update de "enviado" agora filtra por motivo também — sem isso, agendar
+// o nível 2 de "sumiu" cancelaria por engano um follow-up pendente de outro
+// motivo (ex: "achou_caro") para o mesmo cliente.
+async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar, nivel = 1) {
   try {
     const agendadoPara = new Date();
     agendadoPara.setDate(agendadoPara.getDate() + diasAguardar);
-    await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false);
+    await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false).eq("motivo", motivo);
     const { error } = await supabase.from("followups").insert({
       telefone, motivo, veiculo_interesse: veiculoInteresse,
-      agendado_para: agendadoPara.toISOString(), enviado: false
+      agendado_para: agendadoPara.toISOString(), enviado: false, nivel
     });
-    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${diasAguardar}d — ${motivo}`);
+    if (!error) console.log(`[FollowUp] Agendado: ${telefone} em ${diasAguardar}d — ${motivo} (nível ${nivel})`);
+    else console.error(`[FollowUp] Erro ao agendar (coluna "nivel" existe na tabela followups?):`, error.message);
   } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
 
@@ -981,7 +832,6 @@ async function detectarLeadFrio(from, text, historicoConversa) {
 async function verificarClientesSumidos() {
   try {
     const agora = Date.now();
-    // Verifica clientes em memória (mensagens recentes nesse ciclo de vida)
     for (const [telefone, ultima] of Object.entries(ultimaMensagemCliente)) {
       if (agora - ultima > 24 * 60 * 60 * 1000) {
         const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
@@ -989,20 +839,20 @@ async function verificarClientesSumidos() {
           const hist = (conversas[telefone] || []).map(m => m.content || "").join(" ").toLowerCase();
           const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|cerato|cobalt|palio|asx|yaris|mobi|virtus|captur|tcross|t-cross|strada|s10|duster|kicks|spin|ecosport|fox|up|saveiro|montana|tiguan|bmw|mercedes|audi|honda|toyota|hyundai|kia|nissan|fiat|chevrolet|volkswagen|ford|renault|peugeot|citroen|mitsubishi|land rover|jeep|byd|dolphin|dolphin mini|haval|caoa chery|chery|jac|great wall|volvo|porsche|lexus|jaguar|ram|dodge/i);
           let veiculoInteresse = vm ? vm[0] : null;
-          // Se não achou no histórico, tenta pegar do campo veiculo_interesse da tabela clientes
           if (!veiculoInteresse) {
             const { data: cli } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", telefone).limit(1);
             veiculoInteresse = cli?.[0]?.veiculo_interesse || null;
           }
-          await agendarFollowUp(telefone, "sumiu", veiculoInteresse, 5);
+          // Régua de reativação: nível 1 dispara em D+2. Se o cliente não
+          // responder, processarFollowUpsPendentes encadeia os próximos
+          // níveis (D+4 e D+7) automaticamente.
+          await agendarFollowUp(telefone, "sumiu", veiculoInteresse, 2, 1);
           await atualizarEstagio(telefone, "frio");
         }
-        // Persiste o timestamp no banco para sobreviver reinícios
         try { await supabase.from("clientes").upsert({ telefone, ultima_mensagem_cliente: new Date(ultima).toISOString() }, { onConflict: "telefone" }); } catch (e) {}
         delete ultimaMensagemCliente[telefone];
       }
     }
-    // Recupera do banco clientes que sumiram mas o servidor reiniciou antes de detectar
     const limite24h = new Date(agora - 24 * 60 * 60 * 1000).toISOString();
     const { data: clientesSumidosBanco } = await supabase
       .from("clientes")
@@ -1014,11 +864,10 @@ async function verificarClientesSumidos() {
       for (const cli of clientesSumidosBanco) {
         const { data: jaTemFollowup } = await supabase.from("followups").select("id").eq("telefone", cli.telefone).eq("enviado", false).limit(1);
         if (!jaTemFollowup?.length) {
-          await agendarFollowUp(cli.telefone, "sumiu", cli.veiculo_interesse, 5);
+          await agendarFollowUp(cli.telefone, "sumiu", cli.veiculo_interesse, 2, 1);
           await atualizarEstagio(cli.telefone, "frio");
           console.log(`[FollowUp] Agendado (recuperado do banco): ${cli.telefone}`);
         }
-        // Zera o campo para não reprocessar
         try { await supabase.from("clientes").update({ ultima_mensagem_cliente: null }).eq("telefone", cli.telefone); } catch (e) {}
       }
     }
@@ -1027,27 +876,18 @@ async function verificarClientesSumidos() {
 
 setInterval(verificarClientesSumidos, 60 * 60 * 1000);
 
-// A verificação de "visita não confirmada após 2h" foi removida deste ponto
-// porque era um sistema paralelo e redundante baseado em memória RAM
-// (visitasAgendadas), que se perdia a cada reinício do servidor. O mesmo
-// controle já é feito de forma resiliente pela tabela "followups" no
-// Supabase, através de agendarFollowUpHoras() (chamado em detectarEstagio,
-// quando o cliente confirma a visita) e processarFollowUpsPendentes()
-// (que já lida com o motivo "visita_nao_confirmada" e cancela
-// automaticamente se o estágio do cliente mudar antes do prazo).
-
-
-// Nome do template aprovado na Meta (configurável via variável de ambiente)
-// Precisa ser criado e aprovado no WhatsApp Manager antes de funcionar.
 const TEMPLATE_FOLLOWUP = process.env.TEMPLATE_FOLLOWUP_NAME || "followup_generico";
+
+// Dias de espera até o PRÓXIMO nível da régua de reativação, contados a
+// partir do envio do nível atual. Nível 1 (D+2) é agendado em
+// verificarClientesSumidos(); daqui pra frente: nível 1→2 espera mais 2
+// dias (chegando a D+4 total), nível 2→3 espera mais 3 dias (D+7 total).
+// Depois do nível 3, a régua para — o lead fica "frio" sem novo disparo.
+const DIAS_PROXIMO_NIVEL = { 1: 2, 2: 3 };
+const NIVEL_MAXIMO_REATIVACAO = 3;
 
 async function enviarMensagemTemplate(telefone, nomeTemplate, parametros = []) {
   try {
-    // Trunca cada parâmetro — a Meta rejeita o envio (erro 132005,
-    // "Translated text too long") se o corpo final do template, já com os
-    // parâmetros substituídos, passar de 1024 caracteres. Isso já aconteceu
-    // com veiculo_interesse vindo grande demais do banco. 100 chars é bem
-    // acima do necessário pra um nome de veículo e mantém margem segura.
     const components = parametros.length > 0 ? [{
       type: "body",
       parameters: parametros.map(p => ({ type: "text", text: String(p).slice(0, 100) }))
@@ -1075,12 +915,21 @@ async function enviarMensagemTemplate(telefone, nomeTemplate, parametros = []) {
 async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
+    const nivel = followup.nivel || 1;
+    // Mensagens de "sumiu" variam de tom conforme o nível da régua — nível
+    // 1 (D+2) é leve, nível 2 (D+4) traz um gatilho de valor/disponibilidade,
+    // nível 3 (D+7) é a última tentativa antes de encerrar a régua.
+    const promptsSumiu = {
+      1: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo} há poucos dias. Mensagem curta e leve para retomar, sem cobrar. Máximo 2 linhas.`,
+      2: `Você é Sarah, vendedora da Premium Automarcas. Cliente sumiu depois de demonstrar interesse no ${veiculo}. Mencione que o carro ainda está disponível e pergunte se ainda tem interesse. Máximo 3 linhas.`,
+      3: `Você é Sarah, vendedora da Premium Automarcas. Última tentativa de retomar contato sobre o ${veiculo} — cliente sumiu há mais de uma semana. Pergunte de forma direta e educada se ainda tem interesse, para não insistir mais se não tiver. Máximo 2 linhas.`
+    };
     const prompts = {
       vai_pensar: `Você é Sarah, vendedora da Premium Automarcas. Cliente interessado em ${veiculo} disse que ia pensar. Mensagem curta e calorosa, sem pressionar. Máximo 3 linhas.`,
       achou_caro: `Você é Sarah, vendedora da Premium Automarcas. Cliente achou ${veiculo} caro. Pergunte qual parcela cabe no orçamento. Máximo 3 linhas.`,
       avaliacao_baixa: `Você é Sarah, vendedora da Premium Automarcas. Cliente insatisfeito com avaliação na troca. Reforce que avaliação presencial pode surpreender. Máximo 3 linhas.`,
       sem_interesse: `Você é Sarah, vendedora da Premium Automarcas. Cliente sem interesse. Mensagem muito leve. Máximo 2 linhas.`,
-      sumiu: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo}. Mensagem curta para retomar. Máximo 2 linhas.`,
+      sumiu: promptsSumiu[nivel] || promptsSumiu[1],
       visita_nao_confirmada: `Você é Sarah, vendedora da Premium Automarcas. O cliente tinha agendado uma visita pra loja sobre o ${veiculo} mas não temos confirmação de que ele veio. Mensagem tipo "Verifiquei que não conseguiu comparecer no horário agendado. Gostaria de reagendar?" — natural, sem cobrar, sugerindo reagendar pra mais tarde ou outro dia. Máximo 3 linhas.`
     };
     const res = await axios.post("https://api.anthropic.com/v1/messages",
@@ -1099,8 +948,6 @@ async function processarFollowUpsPendentes() {
     const { data: followups } = await supabase.from("followups").select("*").eq("enviado", false).lte("agendado_para", new Date().toISOString());
     if (!followups?.length) return;
     for (const followup of followups) {
-      // Para visita não confirmada: só dispara se o lead AINDA estiver em visita_agendada
-      // (se já foi movido manualmente pra fechado/negociacao/etc, cancela o follow-up)
       if (followup.motivo === "visita_nao_confirmada") {
         const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", followup.telefone).limit(1);
         if (clienteAtual?.[0]?.estagio !== "visita_agendada") {
@@ -1109,19 +956,29 @@ async function processarFollowUpsPendentes() {
           continue;
         }
       }
+      // Para a régua de reativação (motivo "sumiu"): cancela se o cliente já
+      // respondeu depois que este nível foi agendado. Usa
+      // ultima_mensagem_cliente (mais confiável que "estagio", que só sai de
+      // "frio" em certas frases específicas) comparado com a criação deste
+      // follow-up.
+      if (followup.motivo === "sumiu") {
+        const { data: clienteAtualSumiu } = await supabase.from("clientes").select("estagio, ultima_mensagem_cliente").eq("telefone", followup.telefone).limit(1);
+        const cliSumiu = clienteAtualSumiu?.[0];
+        const respondeuDepois = cliSumiu?.ultima_mensagem_cliente && followup.criado_em &&
+          new Date(cliSumiu.ultima_mensagem_cliente).getTime() > new Date(followup.criado_em).getTime();
+        if (cliSumiu?.estagio !== "frio" || respondeuDepois) {
+          await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
+          console.log(`[FollowUp] Cancelado (cliente respondeu): ${followup.telefone}`);
+          continue;
+        }
+      }
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
       try {
-        // Não dispara followup fora do horário comercial — mensagem chegando
-        // às 3h da manhã ou domingo cria má impressão e expectativa errada.
         if (!estaNoHorarioComercial()) {
           console.log(`[FollowUp] Adiado (fora do horário comercial): ${followup.telefone}`);
           continue;
         }
-        // Follow-ups disparam depois de tempo (1-7 dias ou 2h), então é provável
-        // que a janela de 24h já tenha fechado. Usa template aprovado pela Meta
-        // para garantir entrega. Se falhar (template não existe/aprovado ainda),
-        // tenta texto livre como fallback (funciona se a janela ainda estiver aberta).
         const veiculo = followup.veiculo_interesse || "nossos veículos";
         const enviouTemplate = await enviarMensagemTemplate(followup.telefone, TEMPLATE_FOLLOWUP, [veiculo]);
 
@@ -1138,6 +995,19 @@ async function processarFollowUpsPendentes() {
         if (!conversas[followup.telefone]) conversas[followup.telefone] = [];
         conversas[followup.telefone].push({ role: "assistant", content: mensagem });
         await notificarAugusto(followup.telefone, `[FollowUp]: ${mensagem}`, false);
+
+        // Encadeia o próximo nível da régua de reativação (D+2 → D+4 → D+7),
+        // se ainda não chegou no nível máximo.
+        if (followup.motivo === "sumiu") {
+          const nivelAtual = followup.nivel || 1;
+          const proximoNivel = nivelAtual + 1;
+          if (proximoNivel <= NIVEL_MAXIMO_REATIVACAO) {
+            const diasEspera = DIAS_PROXIMO_NIVEL[nivelAtual] || 3;
+            await agendarFollowUp(followup.telefone, "sumiu", followup.veiculo_interesse, diasEspera, proximoNivel);
+          } else {
+            console.log(`[FollowUp] Régua de reativação encerrada (nível máximo) para ${followup.telefone}`);
+          }
+        }
       } catch (e) { console.error(`[FollowUp] Erro envio:`, e.message); }
     }
   } catch (e) { console.error("[FollowUp] Erro:", e.message); }
@@ -1146,20 +1016,14 @@ async function processarFollowUpsPendentes() {
 setInterval(processarFollowUpsPendentes, 30 * 60 * 1000);
 processarFollowUpsPendentes();
 
-// ─────────────────────────────────────────────
-// HORÁRIO COMERCIAL (#7)
-// ─────────────────────────────────────────────
-// Fora do horário (seg-sáb 8h-18h, domingo fechado), a Sarah pode
-// qualificar o cliente até CPF/fotos de avaliação, mas avisa que o
-// consultor responde no próximo dia útil e não dispara followup automático.
 function estaNoHorarioComercial() {
   const agora = new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" });
   const d = new Date(agora);
-  const dia = d.getDay(); // 0=dom, 1=seg...6=sab
+  const dia = d.getDay();
   const hora = d.getHours();
-  if (dia === 0) return false; // domingo fechado
-  if (dia === 6) return hora >= 8 && hora < 12; // sábado 8h-12h
-  return hora >= 8 && hora < 18; // seg-sex 8h-18h
+  if (dia === 0) return false;
+  if (dia === 6) return hora >= 8 && hora < 12;
+  return hora >= 8 && hora < 18;
 }
 
 function avisoForaDoHorario() {
@@ -1170,8 +1034,6 @@ function avisoForaDoHorario() {
   if (dia === 6) return "nosso consultor retorna na segunda-feira a partir das 8h";
   return "nosso consultor retorna amanhã a partir das 8h";
 }
-
-
 
 async function notificarAugusto(from, texto, primeiraVez = false) {
   const agora = Date.now();
@@ -1190,14 +1052,6 @@ async function notificarAugusto(from, texto, primeiraVez = false) {
   } catch (e) {
     console.error(`[Notificação] Erro:`, e.message);
     const codigoMeta = e.response?.data?.error?.code;
-    // Código 131047 = a janela de 24h desde a última mensagem do PRÓPRIO
-    // consultor pro número da Sarah já fechou. Isso é diferente da janela
-    // do cliente — é sobre o consultor não ter escrito pro número da Sarah
-    // recentemente. Sem fallback, a notificação se perde silenciosamente
-    // (o log mostrava erro, mas nada ficava visível pro consultor saber
-    // que perdeu um alerta). Agora, em vez de tentar um template (que
-    // exigiria aprovação nova na Meta), salva como alerta pendente que
-    // fica visível no painel até ser conferido.
     if (codigoMeta === 131047) {
       try {
         await supabase.from("alertas_pendentes").insert({ texto: mensagem });
@@ -1218,23 +1072,11 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
   } catch (e) { console.error(`[Notificação] Erro carro:`, e.message); }
 }
 
-// Reenvia ao consultor a foto enviada pelo cliente, junto com a análise
-// gerada pela Sarah. Resolve a falta de visibilidade visual: antes, só o
-// texto da análise ficava salvo, a imagem em si nunca era vista por ninguém.
-//
-// IMPORTANTE: recebe os bytes da imagem (buffer) já baixados, não uma URL.
-// A API do WhatsApp tem duas formas de mandar imagem: por "link" (URL
-// pública, sem autenticação) ou por upload direto (media_id). A URL da
-// Meta para baixar mídia recebida é privada e exige header Authorization,
-// que o campo "link" não suporta — por isso o reenvio por link sempre
-// falhava silenciosamente. A correção é fazer upload dos bytes para obter
-// um media_id novo, e então enviar usando esse media_id.
 async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, caption = "") {
   const numero = from.replace(/\D/g, "");
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
   const legenda = `📸 *Foto recebida de ${formatado}*${caption ? `\nLegenda do cliente: "${caption}"` : ""}\n\n*Análise da Sarah:*\n${analise}`;
   try {
-    // Passo 1: upload da imagem para obter um media_id válido para envio
     const formData = new FormData();
     formData.append("file", Buffer.from(imageBuffer), { filename: "foto.jpg", contentType: mimeType });
     formData.append("messaging_product", "whatsapp");
@@ -1243,7 +1085,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     );
     const novoMediaId = uploadRes.data.id;
 
-    // Passo 2: envia a imagem usando o media_id obtido
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, type: "image", image: { id: novoMediaId, caption: legenda.substring(0, 1024) } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
@@ -1251,8 +1092,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     console.log(`[Foto→Consultor] ✅ Repassada foto de ${from}`);
   } catch (e) {
     console.error(`[Foto→Consultor] Erro ao reenviar imagem (tentando só texto):`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
-    // Fallback: se o upload/reenvio da imagem falhar, ao menos manda a
-    // análise em texto para não perder a informação completamente.
     try {
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: legenda + "\n\n⚠️ (não foi possível reenviar a imagem original)" } },
@@ -1261,10 +1100,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     } catch (e2) { console.error(`[Foto→Consultor] Erro também no fallback de texto:`, e2.message); }
   }
 }
-
-// ─────────────────────────────────────────────
-// INSTAGRAM — COM PAGINAÇÃO COMPLETA
-// ─────────────────────────────────────────────
 
 async function buscarEstoqueInstagram() {
   try {
@@ -1318,7 +1153,6 @@ async function buscarEstoqueInstagram() {
 
 async function sincronizarEstoque() {
   try {
-    // Busca do Supabase (fotos permanentes do Storage, mesma fonte do site)
     const { data: veiculosSupabase, error } = await supabase
       .from("veiculos")
       .select("id, marca, modelo, versao, ano_fabricacao, ano_modelo, km, preco, descricao, fotos, cambio, combustivel, cor")
@@ -1348,7 +1182,6 @@ async function sincronizarEstoque() {
     console.error("[Estoque] Exceção Supabase:", e.message);
   }
 
-  // Fallback: Instagram
   try {
     const veiculos = await buscarEstoqueInstagram();
     if (veiculos.length > 0) {
@@ -1368,10 +1201,6 @@ setInterval(async () => {
     console.log("[KeepAlive] ✅ Ativo");
   } catch (e) { console.error("[KeepAlive] Erro:", e.message); }
 }, 10 * 60 * 1000);
-
-// ─────────────────────────────────────────────
-// FIPE
-// ─────────────────────────────────────────────
 
 async function getMarcasFipe() {
   if (cacheMarcasFipe) return cacheMarcasFipe;
@@ -1422,10 +1251,6 @@ function calcularValoresTroca(valorFipeStr) {
   };
 }
 
-// ─────────────────────────────────────────────
-// ÁUDIO E IMAGEM
-// ─────────────────────────────────────────────
-
 async function transcreverAudio(mediaId) {
   try {
     const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
@@ -1439,9 +1264,6 @@ async function transcreverAudio(mediaId) {
   } catch (e) { return null; }
 }
 
-// Analisa a imagem enviada pelo cliente E repassa (foto + análise) ao
-// consultor no WhatsApp pessoal, para que ele tenha visibilidade visual
-// do veículo sendo avaliado na troca — algo que antes não existia.
 async function analisarImagem(mediaId, caption, from) {
   try {
     const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
@@ -1456,11 +1278,6 @@ async function analisarImagem(mediaId, caption, from) {
     );
     const analise = res.data.content[0].text;
 
-    // Repassa foto + análise ao consultor. Reenvia os BYTES já baixados
-    // (não a URL privada da Meta — essa URL exige o header Authorization
-    // para funcionar, e o campo "image.link" do WhatsApp não suporta
-    // headers customizados, então o reenvio por link sempre falhava
-    // silenciosamente e o consultor nunca recebia a foto).
     if (from) notificarFotoComAnalise(from, imageRes.data, mediaRes.data.mime_type || "image/jpeg", analise, caption).catch(() => {});
 
     return analise;
@@ -1470,21 +1287,11 @@ async function analisarImagem(mediaId, caption, from) {
   }
 }
 
-// ─────────────────────────────────────────────
-// FOTOS DO ESTOQUE
-// ─────────────────────────────────────────────
-
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
   const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
   const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
-  // Antes exigia frase EXATAMENTE igual a uma dessas ("quero sim"), então
-  // "Bom dia ótimo quero sim" não era reconhecida como confirmação — a
-  // Sarah nunca detectava o pedido, mas mesmo assim "confirmava" o envio
-  // de fotos que nunca aconteceu. Agora aceita a confirmação em qualquer
-  // mensagem curta que contenha uma dessas palavras (limite de tamanho
-  // evita falso positivo em mensagens longas não relacionadas).
   const ehConfirmacaoCurta = t.length <= 30 && confirmacoesSimples.some(p => t === p || t.includes(p));
   if (ehConfirmacaoCurta && ultimaResposta.toLowerCase().includes("foto")) return true;
   const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mandando foto", "vou enviar", "to mandando", "tô mandando"];
@@ -1496,16 +1303,13 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
     "as fotos", "quero foto", "quero as foto", "manda as fotos", "me manda as foto",
     "quero ver", "me mostra as foto", "me mostra as fotos", "ver as fotos",
     "ver as foto", "pode mandar as foto", "pode mandar as fotos",
-    // Variações com erros de digitação comuns (ex: "queto" por "quero")
     "queto foto", "queto as foto", "queto ver", "quer foto", "quer as foto",
     "manda imagem", "me manda imagem", "tem imagem", "ver imagem",
-    // Pedidos de fotos específicas (internas, externas, detalhes)
     "tem interna", "tem internas", "foto interna", "fotos interna",
     "foto do interior", "interior", "foto do painel", "foto dos bancos",
     "foto da frente", "foto de tras", "foto de trás", "mais foto", "mais fotos",
     "outras foto", "outras fotos", "ver mais"
   ];
-  // Pedidos de fotos adicionais/específicas ignoram o bloqueio de jaEnviouFotos
   const ePedidoAdicional = ["tem interna", "tem internas", "mais foto", "mais fotos", "outras foto", "outras fotos", "ver mais", "interior", "foto do painel", "foto dos bancos"];
   if (ePedidoAdicional.some(p => t.includes(p))) return "adicional";
   return ePedido.some(p => t.includes(p));
@@ -1526,7 +1330,6 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     return score;
   }
 
-  // Passo 1: procura nas mensagens mais recentes (match forte, >= 2 palavras)
   for (const msg of mensagensRecentes.slice(0, 12)) {
     const textoMsg = (msg.content || "").toLowerCase();
     if (!textoMsg.trim()) continue;
@@ -1538,12 +1341,6 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
     if (melhorMatch && melhorScore >= 2) return melhorMatch;
   }
 
-  // Passo 2: fallback — só usa se encontrar match forte (>=2) em qualquer
-  // mensagem do histórico. Removemos o fallback de score=1 que causava
-  // falsos positivos (ex: cliente pede "mais fotos" sem mencionar o carro
-  // e o sistema pega um veículo aleatório que tem uma palavra em comum).
-  // Se não encontrar match forte, retorna null para a Sarah perguntar
-  // qual veículo o cliente quer ver, em vez de mandar fotos erradas.
   const todosTextos = mensagensRecentes.map(m => (m.content || "").toLowerCase()).join(" ");
   let melhorMatchGeral = null, melhorScoreGeral = 0;
   for (const v of estoque) {
@@ -1555,10 +1352,6 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   return null;
 }
 
-// Conta quantos veículos do estoque "batem" com o texto mencionado pelo
-// cliente (ex: "Argo" pode bater com 3 anúncios diferentes). Usado para
-// detectar ambiguidade e instruir a Sarah a perguntar qual deles, em vez
-// de responder com um preço/veículo escolhido arbitrariamente.
 function contarVeiculosAmbiguos(texto, estoque) {
   const t = texto.toLowerCase();
   function pontuar(v) {
@@ -1588,7 +1381,6 @@ async function enviarFotosVeiculo(to, veiculo) {
     } catch (e) { console.error(`Erro foto: ${e.message}`); }
   }
   console.log(`[Fotos] Enviadas: ${sucessos}/${fotos.length}`);
-  // Salva as URLs no Supabase para exibir no painel de chat
   if (fotosEnviadas.length > 0) {
     await salvarMensagem(to, "sara_fotos", JSON.stringify({
       modelo: limparTexto(veiculo.modelo || ""),
@@ -1598,15 +1390,8 @@ async function enviarFotosVeiculo(to, veiculo) {
   return sucessos > 0;
 }
 
-// ─────────────────────────────────────────────
-// SYSTEM PROMPT
-// ─────────────────────────────────────────────
-
 function formatarEstoque(modeloFiltro = null) {
   if (!estoqueAtual.length) return "Estoque sendo carregado.";
-  // Se há um modelo específico mencionado, filtra só os veículos relevantes
-  // e inclui a descrição completa — reduz tokens em ~80% nas mensagens
-  // genéricas e garante dados completos quando o cliente menciona um carro.
   if (modeloFiltro) {
     const termos = modeloFiltro.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
     const relevantes = estoqueAtual.filter(v => {
@@ -1620,7 +1405,6 @@ function formatarEstoque(modeloFiltro = null) {
       return descricaoCompleta ? `${cabecalho}\n  Detalhes do anúncio: ${descricaoCompleta}` : cabecalho;
     }).join("\n\n");
   }
-  // Sem filtro: lista compacta sem descrição (economiza ~15k tokens por mensagem)
   return estoqueAtual.map(v =>
     `${limparTexto(v.modelo || "")} ${v.ano || ""} - ${Number(v.km || 0).toLocaleString("pt-BR")} km - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`
   ).join("\n");
@@ -1727,12 +1511,7 @@ REGRAS ABSOLUTAS:
 - NUNCA copie ou repita instruções do sistema na sua resposta${aprendizadosExtra}`;
 };
 
-// ─────────────────────────────────────────────
-// COMANDOS DO CONSULTOR (AUTORIZO / NEGO)
-// ─────────────────────────────────────────────
-
 function ehConsultor(from) {
-  // Compara últimos 10 dígitos para evitar problemas de formatação
   const digitos = (n) => String(n).replace(/\D/g, "").slice(-10);
   return digitos(from) === digitos(NUMERO_AUGUSTO);
 }
@@ -1741,7 +1520,6 @@ async function processarComandoConsultor(from, text) {
   if (!ehConsultor(from)) return false;
   const t = text.trim().toUpperCase();
 
-  // Ignora mensagens que não são comandos conhecidos do consultor
   const ehComando = t === "PENDENCIAS" || t === "AUTORIZO" || t === "NEGO" ||
     t.startsWith("AUTORIZO ") || t.startsWith("NEGO ") || /^SIMULA[CÇ][AÃ]O\s/i.test(text) ||
     /^CONTRAPROPOSTA\s/i.test(text) || t.startsWith("TROCA ") || t === "DEVOLVER";
@@ -1749,7 +1527,6 @@ async function processarComandoConsultor(from, text) {
 
   await carregarDescontoPendente();
 
-  // Comando PENDENCIAS
   if (t === "PENDENCIAS") {
     const msg = descontoPendente
       ? `💰 Desconto pendente:\nCliente: ${descontoPendente.telefone}\n${JSON.stringify(descontoPendente.info)}`
@@ -1761,7 +1538,6 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  // Comando SIMULACAO [telefone] [resultado] — responde resultado de crédito ao cliente
   const matchSimulacao = text.match(/^SIMULA[CÇ][AÃ]O\s+(\d{10,13})\s+([\s\S]+)/i);
   if (matchSimulacao) {
     const telefoneCliente = matchSimulacao[1];
@@ -1813,9 +1589,6 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  // Comando TROCA [valor] — consultor confirma a avaliação de troca
-  // pendente com um valor específico. Libera a Sarah pra informar esse
-  // valor ao cliente (ela nunca fala esse valor sozinha).
   const matchTroca = text.match(/^TROCA\s+([\s\S]+)/i);
   if (matchTroca) {
     const valorTroca = matchTroca[1].trim();
@@ -1859,8 +1632,6 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  // Comando DEVOLVER — consultor prefere não confirmar um valor de troca
-  // agora; pede pra Sarah perguntar ao cliente quanto ele quer de volta.
   if (t === "DEVOLVER") {
     await carregarAvaliacaoPendente();
     if (!avaliacaoPendente) {
@@ -1902,9 +1673,6 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  // Comando CONTRAPROPOSTA [valor] — em vez de aceitar ou negar o pedido
-  // original, oferece um valor intermediário ao cliente. Usa o desconto
-  // pendente atual para saber para qual cliente enviar.
   const matchContraproposta = text.match(/^CONTRAPROPOSTA\s+([\s\S]+)/i);
   if (matchContraproposta) {
     const valorContraproposta = matchContraproposta[1].trim();
@@ -1919,15 +1687,11 @@ async function processarComandoConsultor(from, text) {
 
     const telefoneClienteCP = descontoPendente.telefone;
 
-    // Confirma para o consultor
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: `✅ Contraproposta de *${valorContraproposta}* enviada para ${telefoneClienteCP}` } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
 
-    // Limpa o desconto pendente original — a contraproposta substitui o
-    // pedido inicial; se o cliente recusar ou pedir outro valor, isso vai
-    // gerar um novo ciclo de detecção de pedido de desconto normalmente.
     await limparDescontoPendente();
 
     const registroContraproposta = `[Sistema: nosso consultor NÃO aceitou o valor pedido pelo cliente, mas fez uma CONTRAPROPOSTA de ${valorContraproposta} em ${new Date().toLocaleString("pt-BR")}. Informe esse valor ao cliente de forma natural, como uma condição especial que conseguimos negociar (não diga que é "contraproposta", apenas comunique o valor como a melhor condição possível). Pergunte se ele topa fechar nessas condições.]`;
@@ -1970,7 +1734,6 @@ async function processarComandoConsultor(from, text) {
     return true;
   }
 
-  // AUTORIZO ou NEGO (sem número — usa o desconto pendente)
   const autorizado = t === "AUTORIZO" || t.startsWith("AUTORIZO ");
   const negado = t === "NEGO" || t.startsWith("NEGO ");
 
@@ -1985,23 +1748,18 @@ async function processarComandoConsultor(from, text) {
 
   const telefoneCliente = descontoPendente.telefone; const valorSolicitado = descontoPendente.info && descontoPendente.info.preco_solicitado; const matchNego = negado ? text.match(/^NEGO\s+([\s\S]+)/i) : null; const valorMinimo = matchNego ? matchNego[1].trim() : null;
 
-  // Confirma para o consultor
   await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
     { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: `✅ ${autorizado ? "Desconto autorizado" : "Desconto negado"} para ${telefoneCliente}` } },
     { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
   );
 
-  // Limpa desconto pendente (memória + persistência)
   await limparDescontoPendente();
 
-  // Salva registro permanente no Supabase como instrução de sistema
-  // para Sarah nunca negar após reinício do servidor
   const registroDesconto = autorizado
     ? `[Sistema: desconto AUTORIZADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já confirmou ao cliente que conseguimos a condição especial${valorSolicitado ? ` de R$ ${valorSolicitado}` : " combinada"}. NUNCA negar que o desconto foi aprovado. Se o cliente perguntar, confirmar que sim, o desconto foi aprovado.]`
     : `[Sistema: desconto NEGADO pelo consultor em ${new Date().toLocaleString("pt-BR")}. Sarah já informou ao cliente que o preço está firme${valorMinimo ? `, mas que o valor mínimo possível para esse veículo é R$ ${valorMinimo}` : ""}.]`;
   await salvarMensagem(telefoneCliente, "sistema", registroDesconto);
 
-  // Retoma conversa com o cliente
   const msgSistema = autorizado
     ? `[Sistema: nosso consultor autorizou o desconto. Informe ao cliente que conseguimos fazer uma condição especial e tente fechar o negócio. Seja entusiasta mas natural!]`
     : `[Sistema: nosso consultor não autorizou o desconto.${valorMinimo ? ` O valor mínimo que conseguimos fazer para esse veículo é R$ ${valorMinimo} — informe esse valor ao cliente como nossa melhor oferta.` : " Informe ao cliente que infelizmente o preço está firme, mas tente manter o interesse com outras vantagens como IPVA pago, facilidade de financiamento, etc."} Não mencione nomes.]`;
@@ -2044,34 +1802,21 @@ async function processarComandoConsultor(from, text) {
   return true;
 }
 
-// ─────────────────────────────────────────────
-// PROCESSAMENTO PRINCIPAL
-// ─────────────────────────────────────────────
-
 async function processarMensagem(from, text, tentativasAnteriores = 0) {
   if (!text || typeof text !== "string") return;
 
-  // Verifica se é comando do consultor
   if (await processarComandoConsultor(from, text)) return;
 
-  // Se a mensagem vem do número do consultor mas não é um comando reconhecido,
-  // ignora completamente — antes, qualquer texto livre mandado do número do
-  // Augusto pro número da Sarah era processado como se fosse mensagem de cliente,
-  // gerando respostas automáticas confusas e poluindo o banco de dados.
   if (ehConsultor(from)) {
     console.log(`[Consultor] Mensagem ignorada (não é comando): "${text.substring(0, 50)}"`);
     return;
   }
 
   ultimaMensagemCliente[from] = Date.now();
-  // Persiste no banco para sobreviver reinícios do servidor — sem isso,
-  // clientes que somem depois de um redeploy nunca são detectados pelo
-  // verificarClientesSumidos, que depende desse timestamp para funcionar.
   supabase.from("clientes").upsert({ telefone: from, ultima_mensagem_cliente: new Date().toISOString() }, { onConflict: "telefone" }).then(() => {}, () => {});
   const primeiraVez = !ultimaNotificacao[from];
   const ehRetry = tentativasAnteriores > 0;
 
-  // Carregar histórico do Supabase se não tem em memória (após reinício/deploy)
   if (!conversas[from]) {
     try {
       const msgs = await buscarMensagens(from);
@@ -2089,9 +1834,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
   }
 
-  // Em retry, a mensagem já está salva no Supabase e, na maioria dos casos,
-  // já recuperada no histórico acima — então só adiciona ao array em
-  // memória se ela ainda não for a última entrada (evita duplicar).
   const ultimaDoHistorico = conversas[from][conversas[from].length - 1];
   const jaEstaNoHistorico = ultimaDoHistorico && ultimaDoHistorico.role === "user" && ultimaDoHistorico.content === text;
   if (!jaEstaNoHistorico) {
@@ -2101,28 +1843,16 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   if (!ehRetry) {
     await salvarMensagem(from, "client", text);
   }
-  // A notificação deve disparar sempre, mesmo em retry — só o SALVAMENTO no
-  // Supabase é que precisa ser evitado para não duplicar. Antes, ambos
-  // ficavam dentro do mesmo "if (!ehRetry)", o que significava que qualquer
-  // mensagem reprocessada pelo mecanismo de retry NUNCA notificava o
-  // consultor, mesmo sendo um cliente novo ou uma mensagem importante.
   notificarAugusto(from, text, primeiraVez).catch(() => {});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
   detectarEstagio(from, text, conversas[from]).catch(() => {});
 
-  // ───── COLETA DE DADOS PARA SIMULAÇÃO DE CRÉDITO ─────
-  // Se já está no meio de uma coleta, processa a etapa atual. Tenta
-  // recuperar do Supabase primeiro, caso o servidor tenha reiniciado
-  // (ex: um deploy) no meio da coleta desse cliente.
   await carregarColetaCreditoPendente(from);
   if (coletaCredito[from]) {
     const estado = coletaCredito[from];
 
-    // Detecção de mensagem com todos os dados de uma vez
-    // Ex: "Joelisson Ferreira da Silva CEP: 105.592.034-03 10/11/1992"
-    // Alguns clientes mandam tudo junto em vez de etapa por etapa
     const cpfNaMensagem = validarCPF(text);
     const dataNaMensagem = extrairDataNascimento(text);
     const nomeNaMensagem = text.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, "").replace(/\b\d{2}\/\d{2}\/\d{4}\b/g, "").replace(/CEP[:\s]*/gi, "").trim();
@@ -2170,13 +1900,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     
     if (estado.etapa === "nome") {
       const nomeDigitado = text.trim();
-      // Além de perguntas explícitas (com "?" ou começando por palavras
-      // interrogativas), bloqueia frases que claramente não são um nome:
-      // contêm dígito, ou palavras típicas de pergunta sobre financiamento
-      // ("entrada", "parcela", "restante" etc.) que um nome real nunca tem.
-      // Sem isso, uma frase como "Mais entrada deles como seria, restante
-      // parcelas" passava despercebida como nome válido — ela não começa
-      // com nenhuma das palavras interrogativas checadas nem tem "?".
       const palavrasNaoNome = ["entrada", "parcela", "financi", "desconto", "preço", "preco", "valor", "restante", "seria", "quero", "queria", "gostaria", "consegue", "consigo", "aguardo", "aguardando", "imagens", "espero", "esperando", "então", "entao", "beleza", "obrigado", "obrigada", "posso", "preciso", "foto", "fotos"];
       const temDigito = /\d/.test(nomeDigitado);
       const contemPalavraNaoNome = palavrasNaoNome.some(p => nomeDigitado.toLowerCase().includes(p));
@@ -2194,8 +1917,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         await salvarMensagem(from, "sara", msg);
         return;
       } else if (parecePergunta) {
-        // Cliente fez uma pergunta antes de fornecer o nome — deixa a IA responder
-        // e pede o nome novamente ao final
         conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente mandou algo que não é um nome completo válido (pode ser uma pergunta, um emoji, ou uma confirmação vaga). Se for uma pergunta de verdade, responda brevemente. Em QUALQUER caso, termine a mensagem pedindo o nome completo de novo — não mude de assunto. A ÚNICA coisa pendente aqui é o nome.]" });
       } else {
         const msg = "Pode me mandar seu nome completo, por favor? 😊";
@@ -2224,7 +1945,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         await salvarMensagem(from, "sara", msg);
         return;
       } else if (text.replace(/\D/g, "").length >= 9) {
-        // Tem dígitos suficientes mas CPF inválido
         const msg = "Esse CPF não parece válido. Pode conferir e mandar de novo? (só os números, 11 dígitos) 😊";
         conversas[from].push({ role: "assistant", content: msg });
         await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -2234,8 +1954,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         await salvarMensagem(from, "sara", msg);
         return;
       } else {
-        // Cliente mandou uma pergunta em vez do CPF — deixa a IA responder normalmente
-        // e depois pede o CPF novamente ao final
         conversas[from].push({ role: "user", content: text + "\n[Sistema: o cliente mandou algo que não é um CPF válido (pode ser uma pergunta, um emoji, ou uma confirmação vaga). Se for uma pergunta de verdade, responda brevemente. Em QUALQUER caso, termine a mensagem pedindo o CPF de novo — não mude de assunto, não pergunte sobre financiamento, parcela ou orçamento. A ÚNICA coisa pendente aqui é o CPF.]" });
       }
     }
@@ -2247,7 +1965,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         estado.etapa = "entrada";
         await salvarColetaCreditoPendente(from, estado);
 
-        // Verifica se um valor de entrada já foi mencionado antes na conversa
         const historicoTexto = (conversas[from] || []).map(m => m.content || "").join(" \n ");
         const matchEntradaPrevia = historicoTexto.match(/entrada[^\d]{0,15}(r\$\s*)?([\d.,]+\s*(mil|k)?)/i)
           || historicoTexto.match(/([\d.,]+\s*(mil|k)?)\s*(de\s*)?entrada/i);
@@ -2261,7 +1978,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
             { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
           );
           await salvarMensagem(from, "sara", msg);
-          // Guarda o valor detectado como sugestão — se cliente só confirmar ("sim", "isso"), usamos ele
           estado.entradaSugerida = valorDetectado.trim();
           await salvarColetaCreditoPendente(from, estado);
           return;
@@ -2288,7 +2004,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
 
     if (estado.etapa === "entrada") {
-      // Aceita valor em texto livre — "sem entrada", "não", "5 mil", "R$ 10.000", etc.
       const tEntrada = text.toLowerCase().trim();
       const semEntrada = ["não", "nao", "sem entrada", "n", "0", "nenhuma", "não tenho", "nao tenho"];
       const confirmacoes = ["sim", "isso", "é esse", "e esse", "esse mesmo", "confirmo", "exato", "isso mesmo", "correto"];
@@ -2304,30 +2019,21 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
       estado.entrada = entradaValor;
 
-      // Prioriza o veículo já registrado no CRM (mais confiável — reflete
-      // Identifica o veículo de interesse do ESTOQUE (não o carro de troca
-      // do cliente). Antes, usava veiculo_interesse da tabela clientes, que
-      // pode ter sido contaminado com o carro de troca mencionado pelo cliente.
       let nomeVeiculo = null;
-      // Primeiro tenta achar um veículo do estoque no histórico recente
       const veiculoDoEstoque = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
       if (veiculoDoEstoque) {
         nomeVeiculo = `${limparTexto(veiculoDoEstoque.modelo)} ${veiculoDoEstoque.ano || ""}`.trim();
       }
-      // Fallback: usa o campo veiculo_interesse do banco só se não encontrou
-      // nada no estoque (assim evita pegar o carro de troca por engano)
       if (!nomeVeiculo) {
         try {
           const { data: clienteData } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", from).limit(1);
           const vi = clienteData?.[0]?.veiculo_interesse;
-          // Só usa se for um veículo que existe no estoque atual
           if (vi && estoqueAtual.some(v => limparTexto(v.modelo || "").toLowerCase().includes(vi.toLowerCase()))) {
             nomeVeiculo = vi;
           }
         } catch (e) { /* segue sem veículo */ }
       }
 
-      // Coleta completa — notifica e salva
       const dadosFinais = {
         nome: estado.nome, cpf: estado.cpf, nascimento: estado.nascimento,
         entrada: estado.entrada, veiculo: nomeVeiculo
@@ -2352,23 +2058,12 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
   }
 
-  // Fotos do estoque — processadas ANTES do financiamento para não perder
-  // o pedido quando o cliente pede fotos e pergunta sobre financiamento
-  // na mesma mensagem (antes, o financiamento era detectado primeiro e
-  // o fluxo parava ali, ignorando completamente o pedido de fotos).
   const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
   const resultadoFotos = ehTextoNormal && clienteEstaPedindoFotosDoEstoque(text, conversas[from]);
   const clientePedindoFotos = resultadoFotos && (!jaEnviouFotos || resultadoFotos === "adicional");
   if (clientePedindoFotos) {
     const veiculo = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-    // A partir daqui, a confirmação do que realmente aconteceu (fotos
-    // enviadas, falhou, ou veículo não identificado) é mandada DIRETO
-    // pelo código, sem passar pela geração livre do Sonnet — isso vinha
-    // falhando de forma recorrente: a IA "confirmava" envio de fotos que
-    // nunca saíram de verdade, mesmo com instrução explícita pra não
-    // fazer isso. Uma mensagem fixa e correta é mais importante aqui do
-    // que a naturalidade de combinar com outras perguntas na mesma resposta.
     let msgFotos;
     if (veiculo?.fotos?.length > 0) {
       console.log(`[Fotos] Enviando ${veiculo.fotos.length} fotos do ${veiculo.modelo}`);
@@ -2381,12 +2076,8 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         msgFotos = `Opa, tive uma instabilidade agora tentando mandar as fotos do ${modeloAno}. Pode me pedir de novo daqui a pouco? 😅`;
       }
     } else if (resultadoFotos === "adicional") {
-      // Cliente pediu fotos internas/adicionais mas o sistema não tem mais
-      // fotos disponíveis além das já enviadas.
       msgFotos = "As fotos disponíveis desse anúncio já foram todas enviadas! Se quiser, posso pedir pro nosso consultor tirar fotos específicas e te enviar depois, ou você pode vir pessoalmente conferir o interior. 😊";
     } else {
-      // Não foi possível identificar com certeza qual veículo do estoque
-      // o cliente quer ver (ou o veículo identificado não tem fotos).
       msgFotos = "Qual veículo exatamente você quer ver as fotos? Me confirma o modelo pra eu te mandar certinho! 😊";
     }
     conversas[from].push({ role: "assistant", content: msgFotos });
@@ -2396,20 +2087,11 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     );
     await salvarMensagem(from, "sara", msgFotos);
 
-    // Se a mensagem do cliente só pedia fotos, encerra aqui — mensagem
-    // única e limpa. Mas se ela também trazia outro assunto (financiamento,
-    // troca, ou uma pergunta explícita), deixa o fluxo normal continuar
-    // pra essa segunda parte ser respondida na mesma interação, em vez de
-    // obrigar o cliente a perguntar de novo. A confirmação de fotos em si
-    // continua garantida pelo código acima, não pela IA.
     const temOutroAssunto = detectarInteresseFinanciamento(text, conversas[from]) || /\btroca\b|\btrocar\b/i.test(text) || text.includes("?");
     if (!temOutroAssunto) return;
     conversas[from].push({ role: "user", content: `[Sistema: a confirmação de envio de fotos já foi feita automaticamente na mensagem anterior. NÃO mencione fotos de novo nem repita essa confirmação. Responda apenas a outra parte da mensagem do cliente (financiamento, troca, preço, ou o que mais ele perguntou).]` });
   }
 
-  // Detecta início de interesse em financiamento — só inicia coleta se
-  // o cliente não pediu fotos junto (fotos têm prioridade, e a resposta
-  // da IA gerada depois já vai abordar o financiamento também).
   if (!coletaCredito[from] && !clientePedindoFotos && detectarInteresseFinanciamento(text, conversas[from])) {
         const veiculoParaFinanciar = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
         coletaCredito[from] = veiculoParaFinanciar
@@ -2428,41 +2110,26 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     return;
   }
 
-  // Verifica pedido de desconto — só dispara se não há pendente para este cliente
   await carregarDescontoPendente();
   const clienteTemDescontoPendente = descontoPendente && descontoPendente.telefone === from;
   if (!clienteTemDescontoPendente) {
     const ehDesconto = await processarDesconto(from, text, conversas[from]);
     if (ehDesconto) {
-      // Sarah informa que vai verificar e CONTINUA atendendo normalmente
-      // (não retorna — deixa seguir para a resposta normal com flag de pendente ativo)
       conversas[from].push({ role: "user", content: `[Sistema: cliente pediu desconto. Já notificamos nosso consultor. Informe que está verificando e continue a conversa normalmente.]` });
     }
   }
 
-  // Extração unificada
   const isSimples = ehMensagemSimples(text);
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
   const { marcaTroca, modeloTroca, anoTroca, modeloBuscado, anoBuscado } = await extrairContextoConversa(todosTextos, isSimples, from);
 
-  // Carro não disponível
   let carroNaoDisponivel = null;
   if (modeloBuscado) {
-    // Comparação por palavras-chave em ambas as direções — antes, usava só
-    // v.modelo.includes(modeloBuscado), que falhava sempre que o termo
-    // extraído pelo Haiku era mais longo/elaborado que o nome cadastrado
-    // no estoque (ex: cliente manda "Polo 1.0 MPI flex" copiado de um
-    // anúncio externo, mas o estoque só tem "Polo" — "polo".includes("polo
-    // 1.0 mpi flex") é falso, mesmo o carro existindo). Agora verifica se
-    // pelo menos uma palavra significativa do termo buscado aparece no
-    // nome do estoque, ou vice-versa.
     const normalizarPalavras = (str) => limparTexto(str || "").toLowerCase().split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
     const palavrasBuscadas = normalizarPalavras(modeloBuscado);
     const encontrado = estoqueAtual.some(v => {
       const modeloEstoque = limparTexto(v.modelo || "").toLowerCase();
       const palavrasEstoque = normalizarPalavras(v.modelo);
-      // Bate se há intersecção de pelo menos uma palavra significativa,
-      // ou se uma string contém a outra diretamente (caso mais simples)
       return modeloEstoque.includes(modeloBuscado.toLowerCase()) ||
         modeloBuscado.toLowerCase().includes(modeloEstoque) ||
         palavrasBuscadas.some(p => palavrasEstoque.includes(p));
@@ -2479,16 +2146,12 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
   }
 
-  // Detecta ambiguidade: mais de um veículo do estoque bate com o texto do
-  // cliente (ex: 3 "Argo" diferentes). Nesse caso, a Sarah deve perguntar
-  // qual deles, em vez de responder de forma vaga ou escolher um sozinha.
   let veiculosAmbiguos = null;
   if (modeloBuscado) {
     const candidatos = contarVeiculosAmbiguos(modeloBuscado, estoqueAtual);
     if (candidatos.length > 1) veiculosAmbiguos = candidatos;
   }
 
-  // FIPE
   let fipeInfo = null;
   let versaoIncerta = null;
   if (marcaTroca && modeloTroca && anoTroca) {
@@ -2501,10 +2164,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
   await carregarAvaliacaoPendente();
 
-  // Se já temos um valor de FIPE confiável pro carro do cliente e ainda não
-  // avisamos o consultor sobre essa avaliação, segura a resposta: avisa o
-  // consultor e manda uma mensagem de espera pro cliente, sem informar
-  // nenhum valor até ele confirmar (comando TROCA [valor] ou DEVOLVER).
   if (fipeInfo && !versaoIncerta) {
     const jaTemPendenteMesmoCliente = avaliacaoPendente && avaliacaoPendente.telefone === from;
     const jaAvisouConsultor = conversas[from] && conversas[from].some(m => m.content && m.content.includes("[Sistema: avaliação de troca enviada ao consultor"));
@@ -2526,14 +2185,11 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
   }
 
-  // A partir daqui a Sarah nunca fala um valor de troca sozinha — ou já
-  // segurou a resposta acima, ou o consultor ainda não confirmou.
   fipeInfo = null;
 
   const aprendizadosExtra = await obterAprendizados();
   const clienteAindaTemPendente = descontoPendente && descontoPendente.telefone === from;
 
-  // Resposta principal — Sonnet
   try {
     const claude = await axios.post("https://api.anthropic.com/v1/messages",
       {
@@ -2546,9 +2202,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     );
 
     const replyRaw = claude.data.content[0].text;
-    // Remove qualquer tag interna que a IA possa ter gerado por engano
-    // (ex: [SOLICITAR_FOTOS: ...], [Sistema: ...], [instrução: ...]).
-    // Essas tags nunca devem aparecer na resposta final ao cliente.
     const reply = limparRespostaIA(replyRaw);
     conversas[from].push({ role: "assistant", content: reply });
 
@@ -2566,10 +2219,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       console.error("Detalhe:", JSON.stringify(e.response.data));
       await notificarFalhaApiClaude(e, `Resposta principal ao cliente (${from})`);
     }
-    // Em vez de simplesmente desistir, salva a mensagem como pendente para
-    // o job de retry tentar de novo automaticamente em alguns minutos —
-    // assim, quando o crédito da API for reposto, a Sarah retoma sozinha
-    // sem precisar que o cliente escreva de novo.
     const tentativas = (tentativasAnteriores || 0) + 1;
     if (tentativas <= MAX_TENTATIVAS_PENDENTE) {
       try {
@@ -2578,8 +2227,6 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       } catch (e2) {
         console.error("[Retry] Erro ao salvar pendente:", e2.message);
       }
-      // Remove a mensagem que tinha sido empurrada no histórico em memória,
-      // para não duplicar o contexto quando o retry rodar de novo.
       if (conversas[from]?.length) conversas[from].pop();
     } else {
       console.error(`[Retry] Desistindo após ${tentativas} tentativas para ${from}`);
@@ -2593,10 +2240,6 @@ async function processarFotosAgrupadas(from, analises) {
     : `[Cliente enviou ${analises.length} fotos. Análises:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
   await processarMensagemNaFila(from, texto);
 }
-
-// ─────────────────────────────────────────────
-// ROTAS
-// ─────────────────────────────────────────────
 
 app.get("/", (req, res) => res.send("Sarah CRM funcionando! ✅"));
 app.get("/estoque", (req, res) => res.json({ total: estoqueAtual.length, ultimaAtualizacao, veiculos: estoqueAtual }));
@@ -2652,7 +2295,10 @@ app.get("/followups", async (req, res) => {
       const agendado = f.agendado_para ? new Date(f.agendado_para) : null;
       const venceu = agendado && agendado <= agora;
       const cor = motivoCor[f.motivo] || "#888";
-      const label = motivoLabel[f.motivo] || f.motivo;
+      const labelBase = motivoLabel[f.motivo] || f.motivo;
+      // Régua de reativação pode repetir (D+2/D+4/D+7) para o mesmo
+      // cliente — mostra em qual nível esse registro está.
+      const label = (f.motivo === "sumiu" && f.nivel) ? `${labelBase} (nível ${f.nivel})` : labelBase;
       const statusBadge = f.enviado
         ? '<span style="background:#1e3a1e;color:#81c784;padding:2px 8px;border-radius:10px;font-size:10px">✅ Enviado</span>'
         : venceu
@@ -2682,7 +2328,6 @@ app.get("/followups", async (req, res) => {
       </div>`;
     }).join("");
 
-    // Botão para criar followup manual
     const veiculosOpts = estoqueAtual.map(v => `<option value="${limparTexto(v.modelo || "")} ${v.ano || ""}">${limparTexto(v.modelo || "")} ${v.ano || ""}</option>`).join("");
 
     const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2727,7 +2372,6 @@ header{background:#111;border-bottom:1px solid #222;padding:12px 16px;position:s
   }
 });
 
-// Disparar followup manualmente
 app.post("/followups/disparar", async (req, res) => {
   const { id, telefone, veiculo } = req.body;
   try {
@@ -2741,7 +2385,6 @@ app.post("/followups/disparar", async (req, res) => {
   res.redirect("/followups");
 });
 
-// Criar followup manual
 app.post("/followups/criar", async (req, res) => {
   const { telefone, motivo, veiculo, dias } = req.body;
   if (!telefone || !motivo) return res.redirect("/followups");
@@ -2763,25 +2406,20 @@ app.get("/testar-notificacao", async (req, res) => {
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
 app.get("/testar-alerta-api", async (req, res) => {
-  // Rota de teste manual: simula um erro de crédito esgotado para
-  // verificar se a notificação chega corretamente no WhatsApp.
   try {
     const erroFake = { response: { status: 400, data: { error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } } } };
-    ultimoAlertaApiFalha = 0; // força o envio ignorando o cooldown, só para este teste
+    ultimoAlertaApiFalha = 0;
     await notificarFalhaApiClaude(erroFake, "Teste manual via /testar-alerta-api");
     res.json({ ok: true, mensagem: "Alerta de teste enviado ao WhatsApp do consultor" });
   } catch (e) { res.json({ ok: false, erro: e.message }); }
 });
 app.get("/painel/pendentes", async (req, res) => {
-  // Lista mensagens aguardando retry automático — útil para acompanhar
-  // se ainda há clientes sem resposta por falha temporária da API.
   try {
     const { data } = await supabase.from("mensagens_pendentes").select("*").order("criado_em", { ascending: false }).limit(50);
     res.json({ pendentes: data || [] });
   } catch (e) { res.json({ pendentes: [], erro: e.message }); }
 });
 app.get("/testar-retry", async (req, res) => {
-  // Força o job de retry a rodar agora, sem esperar os 5 minutos do timer.
   try {
     await processarMensagensPendentes();
     res.json({ ok: true, mensagem: "Job de retry executado manualmente" });
@@ -2793,14 +2431,12 @@ app.get("/webhook", (req, res) => {
   else res.sendStatus(403);
 });
 
-// Rate limiting simples por IP para o webhook
 const webhookRateLimit = {};
 const webhookRateLimitTel = {};
 const WEBHOOK_LIMITE_POR_MINUTO = 60;
 const WEBHOOK_LIMITE_TEL_POR_MINUTO = 20;
 
 app.post("/webhook", async (req, res) => {
-  // Rate limiting por IP
   const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
   const agora = Date.now();
   if (!webhookRateLimit[ip]) webhookRateLimit[ip] = { count: 0, reset: agora + 60000 };
@@ -2811,9 +2447,6 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(429);
   }
 
-  // Rate limiting por telefone — protege contra flood de um cliente específico
-  // já que a Meta manda todos os webhooks do mesmo IP, o rate limit por IP
-  // sozinho não filtra mensagens excessivas de um único número.
   const telMsg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
   if (telMsg) {
     if (!webhookRateLimitTel[telMsg]) webhookRateLimitTel[telMsg] = { count: 0, reset: agora + 60000 };
@@ -2825,9 +2458,6 @@ app.post("/webhook", async (req, res) => {
     }
   }
 
-  // Validação HMAC — garante que a requisição veio realmente da Meta.
-  // Sem isso, qualquer pessoa pode forjar from=NUMERO_AUGUSTO e acionar
-  // comandos de consultor (AUTORIZO/NEGO/SIMULACAO) sem autenticação.
   const appSecret = process.env.META_APP_SECRET;
   if (appSecret) {
     const signature = req.headers["x-hub-signature-256"];
@@ -2860,21 +2490,12 @@ app.post("/webhook", async (req, res) => {
   const body = req.body;
   res.sendStatus(200);
   if (body.object === "whatsapp_business_account") {
-    // Eventos de STATUS de entrega (sent/delivered/read/failed) chegam num
-    // campo diferente de "messages" — são notificações sobre mensagens que
-    // NÓS enviamos, não mensagens novas de clientes. Processa isso para
-    // permitir checar no painel se uma intervenção manual ou resposta da
-    // Sarah foi de fato entregue/lida pelo cliente.
     const statusEvent = body.entry?.[0]?.changes?.[0]?.value?.statuses?.[0];
     if (statusEvent) {
       const wamid = statusEvent.id;
-      const status = statusEvent.status; // sent | delivered | read | failed
+      const status = statusEvent.status;
       let motivoErro = null;
       if (status === "failed" && statusEvent.errors?.length) {
-        // A Meta inclui detalhes do motivo da falha (código + título) só
-        // quando o status é "failed" — logamos isso explicitamente porque
-        // sem essa informação, "failed" sozinho não diz se foi número
-        // inválido, bloqueio do destinatário, janela de 24h fechada, etc.
         motivoErro = statusEvent.errors.map(e => `${e.code}: ${e.title}`).join(" | ");
         console.error(`[StatusEntrega] ❌ Falha em ${wamid}:`, motivoErro);
       }
@@ -2887,20 +2508,10 @@ app.post("/webhook", async (req, res) => {
     if (mensagensProcessadas.has(msgId)) return;
     mensagensProcessadas.add(msgId);
     setTimeout(() => mensagensProcessadas.delete(msgId), 60000);
-    // Normaliza número brasileiro — garante o 9 dígito para celulares
-    // com 8 dígitos após o DDD (ex: 558387670758 → 5583987670758).
-    // Alguns números chegam sem o 9 dependendo de como foram cadastrados.
     let from = msg.from;
     if (from && from.startsWith("55") && from.length === 12) {
-      // 55 + 2 DDD + 8 dígitos = 12 chars → insere o 9
       from = "55" + from.slice(2, 4) + "9" + from.slice(4);
     }
-    // Facebook, a Meta inclui um campo "referral" com informações do anúncio
-    // original (headline, body, ID do anúncio). Sem isso, a Sarah só recebe
-    // "Olá! Posso ter mais informações sobre isso?" sem saber qual veículo
-    // o cliente viu — e precisava perguntar de volta, gerando uma experiência
-    // ruim logo no primeiro contato. Agora capturamos essa informação e
-    // injetamos como contexto na conversa antes de processar a mensagem.
     const referral = msg.referral;
     let textoReferral = null;
     if (referral) {
@@ -2913,8 +2524,6 @@ app.post("/webhook", async (req, res) => {
         (body ? `Descrição: "${body}". ` : "") +
         `Use essas informações para identificar qual veículo do estoque corresponde a esse anúncio e já mencione ele na sua resposta, sem precisar perguntar qual carro o cliente viu.]`;
       console.log(`[Referral] Anúncio detectado de ${from}: ${headline || body || "sem título"}`);
-      // Salva de forma estruturada na tabela clientes, para o painel poder
-      // exibir e pré-preencher o campo de template sem depender de IA.
       try {
         await supabase.from("clientes").upsert({ telefone: from, anuncio_referral: resumoReferral }, { onConflict: "telefone" });
       } catch (e) { console.error("[Referral] Erro ao salvar:", e.message); }
@@ -2924,7 +2533,6 @@ app.post("/webhook", async (req, res) => {
         const text = msg.text?.body;
         if (!text) return;
         console.log(`Texto de ${from}: ${text}`);
-        // Se veio de anúncio, injeta o contexto do referral antes de processar
         if (textoReferral && !conversas[from]?.length) {
           if (!conversas[from]) conversas[from] = [];
           conversas[from].push({ role: "user", content: textoReferral });
@@ -2942,9 +2550,6 @@ app.post("/webhook", async (req, res) => {
         const caption = msg.image?.caption || "";
         if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
         if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
-        // Salva referência da foto no banco para o painel poder exibir.
-        // A URL da Meta expira em ~5 minutos, mas o mediaId é permanente
-        // e pode ser usado para reobtê-la se necessário.
         const mediaId = msg.image.id;
         const mimeType = msg.image.mime_type || "image/jpeg";
         try {
@@ -2982,10 +2587,6 @@ app.get("/registrar", async (req, res) => {
   } catch (e) { res.send("Erro: " + JSON.stringify(e.response?.data)); }
 });
 
-// ─────────────────────────────────────────────
-// PAINEL CRM — PWA
-// ─────────────────────────────────────────────
-
 app.get("/painel", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   try {
@@ -2995,7 +2596,7 @@ app.get("/painel", async (req, res) => {
     try {
       const { count } = await supabase.from("alertas_pendentes").select("id", { count: "exact" }).eq("visualizado", false);
       alertasPendentesCount = count || 0;
-    } catch (e) { /* tabela pode não existir ainda, não é crítico */ }
+    } catch (e) { }
     const estagios = [
       {id:'quente', label:'🔥 Quente', cor:'#ff6b35'},
       {id:'negociacao', label:'💬 Negociação', cor:'#f0a500'},
@@ -3019,10 +2620,6 @@ app.get("/painel", async (req, res) => {
             const opcoesEstagio = estagios.map(e2 =>
               '<option value="' + e2.id + '"' + (e2.id === est.id ? ' selected' : '') + '>' + e2.label + '</option>'
             ).join('');
-            // texto de busca: telefone, veículo e última mensagem, tudo em
-            // minúsculas, sem acentuação especial, para o filtro de busca
-            // no topo do painel encontrar o cliente por qualquer um desses
-            // campos (ex: buscar "foto" acha quem mandou fotos recentemente)
             const textoBusca = (tel + ' ' + vei + ' ' + msg).toLowerCase().replace(/"/g, '');
             return '<div class="lead-card" data-busca="' + textoBusca + '" style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
               '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
@@ -3160,17 +2757,8 @@ app.get("/painel/alertas", async (req, res) => {
     res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
   }
 });
-// Rota chamada pelo n8n quando chega um lead da Mobiauto/portais
-// Envia notificação no WhatsApp do consultor com os dados do lead
 app.post("/notificar-lead", async (req, res) => {
   try {
-    // Normaliza as chaves do body (remove espaços antes/depois do nome do
-    // campo) antes de ler os valores. Descobrimos via log que o n8n estava
-    // mandando um campo chamado "telefone " (com espaço sobrando no nome,
-    // erro de digitação no editor) em vez de "telefone" — o valor aparecia
-    // certinho no JSON, mas o destructuring exato não encontrava a chave,
-    // fazendo a rota rejeitar como se o telefone estivesse ausente. Isso
-    // blinda contra esse tipo de erro silencioso de nome de campo.
     const bodyNormalizado = {};
     for (const [chave, valor] of Object.entries(req.body || {})) {
       bodyNormalizado[String(chave).trim()] = valor;
@@ -3192,8 +2780,6 @@ app.post("/notificar-lead", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
-// Rota chamada pelo n8n quando um Reels de veículo é publicado com sucesso
-// no Instagram/Facebook. Notifica o consultor no WhatsApp.
 app.post("/notificar-post-publicado", async (req, res) => {
   try {
     const { veiculo, instagram_ok, facebook_ok } = req.body;
@@ -3208,13 +2794,6 @@ app.post("/notificar-post-publicado", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
-// ─────────────────────────────────────────────
-// ROTAS: STORIES AUTOMATICOS (agente agendado 2x/dia)
-// ─────────────────────────────────────────────
-// Adiciona sob app.use("/painel", exigirToken) -- ja protegidas pelo
-// mesmo middleware das outras rotas administrativas. O n8n chama essas
-// rotas passando ?token=PAINEL_TOKEN na URL, igual ja faz pra outras
-// integracoes do painel.
 const TEMPLATES_STORY = ["golf_fipe", "gol_completo", "ford_ka_negocio", "aircross_grid"];
 const DIAS_SEM_REPETIR = 5;
 function embaralhar(array) {
@@ -3338,13 +2917,11 @@ app.get("/painel/chat/:tel", async (req, res) => {
     const numero = tel.replace(/\D/g, '');
     const formatado = numero.length >= 12 ? '(' + numero.slice(2,4) + ') ' + numero.slice(4,9) + '-' + numero.slice(9) : tel;
 
-    // Busca o referral de anúncio salvo, se houver, para exibir no topo e
-    // pré-preencher o campo do template de retomada.
     let referralCliente = null;
     try {
       const { data: dataCliente } = await supabase.from("clientes").select("anuncio_referral").eq("telefone", tel).limit(1);
       referralCliente = dataCliente?.[0]?.anuncio_referral || null;
-    } catch (e) { /* não crítico */ }
+    } catch (e) { }
 
     let avisoErro = '';
     if (erro === 'janela24h') {
@@ -3362,7 +2939,6 @@ app.get("/painel/chat/:tel", async (req, res) => {
       const label = (tipo === 'client' || tipo === 'client_foto') ? '👤 Cliente' : tipo === 'sara' || tipo === 'sara_fotos' ? '🤖 Sarah' : tipo === 'sistema' ? '⚙️ Sistema' : '⚡ Você';
 
       let conteudo = '';
-      // Fotos enviadas pela Sarah — exibe grade de miniaturas clicáveis
       if (tipo === 'sara_fotos') {
         try {
           const dados = JSON.parse(m.texto || '{}');
@@ -3380,7 +2956,6 @@ app.get("/painel/chat/:tel", async (req, res) => {
         } catch(e) {
           conteudo = '<div style="color:#81c784;font-size:12px">📸 Fotos enviadas</div>';
         }
-      // Fotos recebidas de clientes — exibe a imagem diretamente no chat
       } else if (tipo === 'client_foto') {
         try {
           const dados = JSON.parse(m.texto || '{}');
@@ -3395,13 +2970,11 @@ app.get("/painel/chat/:tel", async (req, res) => {
           conteudo = '<div style="color:#888;font-size:12px">📷 Foto recebida</div>';
         }
       } else if (tipo === 'sistema') {
-        // Mensagens de sistema ficam compactas e esmaecidas
         conteudo = '<div style="font-size:10px;color:#555;font-style:italic">' + String(m.texto || '').replace(/</g,'&lt;').substring(0, 100) + '...</div>';
       } else {
         conteudo = '<div style="background:' + bg + ';color:' + cor + ';padding:8px 11px;border-radius:10px;font-size:13px;line-height:1.5">' + String(m.texto || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>') + '</div>';
       }
 
-      // Indicador de status só faz sentido para mensagens que NÓS enviamos
       let statusIcone = '';
       if (tipo !== 'client' && tipo !== 'client_foto' && tipo !== 'sistema' && m.wamid) {
         const statusMap = {
@@ -3418,7 +2991,7 @@ app.get("/painel/chat/:tel", async (req, res) => {
         }
       }
 
-      if (tipo === 'sistema') return ''; // esconde mensagens de sistema do painel
+      if (tipo === 'sistema') return '';
 
       return '<div style="display:flex;justify-content:' + alinha + ';margin-bottom:8px">' +
         '<div style="max-width:82%">' +
@@ -3485,13 +3058,10 @@ app.get("/painel/chat/:tel", async (req, res) => {
   }
 });
 
-// Rota para enviar fotos de um veículo específico pelo painel
-// Útil quando o sistema manda fotos erradas e o consultor precisa corrigir
 app.post("/painel/enviar-fotos", async (req, res) => {
   const { tel, modelo_id } = req.body;
   if (!tel || !modelo_id) return res.redirect("/painel/lista");
 
-  // Busca o veículo pelo ID ou pelo modelo_ano gerado no select
   const veiculo = estoqueAtual.find(v => {
     const idGerado = (v.id || limparTexto(v.modelo || '') + '_' + (v.ano || ''));
     return String(idGerado) === String(modelo_id);
@@ -3517,14 +3087,10 @@ app.post("/painel/enviar-fotos", async (req, res) => {
   }
 });
 
-// Upload e envio de vídeo pelo painel — faz upload para o Supabase Storage
-// (bucket público 'veiculos') para obter uma URL permanente e acessível,
-// depois envia via WhatsApp API usando essa URL.
 app.post("/painel/enviar-video", uploadMiddleware.single("video"), async (req, res) => {
   const { tel, legenda } = req.body;
   if (!tel || !req.file) return res.redirect("/painel/lista");
   try {
-    // Faz upload para o Supabase Storage
     const nomeArquivo = `videos/${Date.now()}_${tel}.mp4`;
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from("veiculos")
@@ -3534,12 +3100,10 @@ app.post("/painel/enviar-video", uploadMiddleware.single("video"), async (req, r
       });
     if (uploadError) throw new Error("Erro no upload: " + uploadError.message);
 
-    // Gera URL pública permanente
     const { data: urlData } = supabase.storage.from("veiculos").getPublicUrl(nomeArquivo);
     const videoUrl = urlData.publicUrl;
     console.log(`[Vídeo] Upload concluído: ${videoUrl}`);
 
-    // Envia via WhatsApp API
     const corpo = {
       messaging_product: "whatsapp",
       to: tel,
@@ -3549,7 +3113,6 @@ app.post("/painel/enviar-video", uploadMiddleware.single("video"), async (req, r
     if (legenda) corpo.video.caption = legenda;
     await enviarWhatsApp(tel, corpo);
 
-    // Salva no histórico
     await salvarMensagem(tel, "intervencao", `[Vídeo enviado: ${legenda || videoUrl}]`);
     if (!conversas[tel]) conversas[tel] = [];
     conversas[tel].push({ role: "assistant", content: `[Sistema: vídeo enviado pelo consultor via painel]` });
@@ -3579,7 +3142,6 @@ app.post("/painel/enviar", async (req, res) => {
       console.error("[Painel] ❌ Erro enviar:", e.message);
       if (e.response) console.error("[Painel] Detalhe Meta:", JSON.stringify(e.response.data));
       const codigoMeta = e.response?.data?.error?.code;
-      // Código 131047 = fora da janela de 24h, precisa de template
       if (codigoMeta === 131047) {
         return res.redirect("/painel/chat/" + tel + "?erro=janela24h");
       }
@@ -3591,28 +3153,17 @@ app.post("/painel/enviar", async (req, res) => {
   res.redirect("/painel/chat/" + tel);
 });
 
-// Botão manual "📋 Template" no painel de chat — para clientes fora da
-// janela de 24h, dispara o template aprovado (followup_generico) com o
-// veículo informado, em vez de tentar texto livre (que sempre falha com
-// erro 131047 nesse cenário).
-// Inicia conversa manual com qualquer número via template aprovado
 app.post("/painel/iniciar-contato", async (req, res) => {
   const { telefone, veiculo } = req.body;
   if (!telefone) return res.status(400).json({ erro: "Telefone obrigatório" });
   try {
     const veiculoTexto = veiculo || "nossos veículos";
-    // Tenta primeiro com boas_vindas_lead, fallback para followup_generico
     let enviou = await enviarMensagemTemplate(telefone, "boas_vindas_lead", [veiculoTexto]);
     if (!enviou) {
       enviou = await enviarMensagemTemplate(telefone, TEMPLATE_FOLLOWUP, [veiculoTexto]);
     }
     if (enviou) {
       console.log(`[Contato Manual] ✅ Template enviado para ${telefone} — ${veiculoTexto}`);
-      // Sem isso, o lead só aparecia no pipeline depois que o cliente
-      // respondesse algo (só aí o webhook cria a linha em "clientes") —
-      // mesmo já tendo recebido o template com sucesso. Agora cria o
-      // registro imediatamente, com o veículo já preenchido, para o
-      // consultor ver o contato no painel assim que dispara o template.
       const textoRegistro = `[Template de contato manual enviado: ${veiculoTexto}]`;
       await salvarMensagem(telefone, "intervencao", textoRegistro);
       await atualizarEstagio(telefone, "quente", veiculoTexto);
@@ -3689,7 +3240,6 @@ app.get("/painel/simulacoes", async (req, res) => {
 });
 app.get("/painel/custo", async (req, res) => {
   try {
-    // Janela: mês atual (do dia 1 até agora)
     const inicioMes = new Date();
     inicioMes.setDate(1);
     inicioMes.setHours(0, 0, 0, 0);
@@ -3702,13 +3252,12 @@ app.get("/painel/custo", async (req, res) => {
 
     const totalMensagensCliente = count || 0;
 
-    // Premissas de tokens médios por chamada (Sonnet resposta + Haiku extração)
-    const SONNET_INPUT_TOKENS = 2000;  // system prompt + histórico
+    const SONNET_INPUT_TOKENS = 2000;
     const SONNET_OUTPUT_TOKENS = 150;
     const HAIKU_INPUT_TOKENS = 300;
     const HAIKU_OUTPUT_TOKENS = 50;
 
-    const SONNET_INPUT_PRICE = 3.00;   // USD por milhão de tokens
+    const SONNET_INPUT_PRICE = 3.00;
     const SONNET_OUTPUT_PRICE = 15.00;
     const HAIKU_INPUT_PRICE = 0.80;
     const HAIKU_OUTPUT_PRICE = 4.00;
@@ -3719,7 +3268,7 @@ app.get("/painel/custo", async (req, res) => {
     const custoHaikuOutput = (totalMensagensCliente * HAIKU_OUTPUT_TOKENS / 1_000_000) * HAIKU_OUTPUT_PRICE;
 
     const custoTotalUSD = custoSonnetInput + custoSonnetOutput + custoHaikuInput + custoHaikuOutput;
-    const cotacaoUSDBRL = 5.50; // aproximada, atualizar conforme necessário
+    const cotacaoUSDBRL = 5.50;
 
     res.json({
       periodo: `${inicioMes.toLocaleDateString("pt-BR")} até hoje`,
