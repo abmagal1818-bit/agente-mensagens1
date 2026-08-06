@@ -2774,7 +2774,7 @@ app.post("/notificar-lead", async (req, res) => {
     const msg = `🔔 *Novo lead — ${portal || "Portal"}*\nNome: *${nome || "Não informado"}*\nFone: ${formatado}\nVeículo: *${veiculo || "Não informado"}*${mensagem ? `\nMensagem: "${mensagem.substring(0, 150)}"` : ""}\n\nFalar com lead: ${linkWhatsApp}\nhttps://agente-mensagens1.onrender.com/painel`;
     await enviarTexto(NUMERO_AUGUSTO, msg);
     console.log(`[Lead] ✅ Notificação enviada: ${formatado} — ${veiculo}`);
-    res.json({ ok: true });
+    try { const { data: existenteCRM } = await supabase.from("clientes").select("id").eq("telefone", numero).limit(1); const payloadCRM = { telefone: numero, nome: nome || undefined, veiculo_interesse: veiculo || undefined, ultima_interacao: new Date().toISOString() }; if (!existenteCRM || !existenteCRM.length) payloadCRM.estagio = "quente"; const { error: erroCRM } = await supabase.from("clientes").upsert(payloadCRM, { onConflict: "telefone" }); if (erroCRM) console.error("[Lead] ERRO ao gravar no CRM (Supabase):", erroCRM.message); else console.log("[Lead] OK gravado no CRM/painel:", numero); } catch (erroCRM) { console.error("[Lead] EXCECAO ao gravar no CRM (Supabase):", erroCRM.message); } res.json({ ok: true });
   } catch(e) {
     console.error("[Lead] Erro notificação:", e.message);
     res.status(500).json({ erro: e.message });
