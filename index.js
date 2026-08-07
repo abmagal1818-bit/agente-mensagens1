@@ -2757,6 +2757,25 @@ app.get("/painel/alertas", async (req, res) => {
     res.send('<html><body style="background:#000;color:#f44;padding:20px">Erro: ' + e.message + '</body></html>');
   }
 });
+app.post("/registrar-mensagem", async (req, res) => {
+try {
+const { telefone, tipo, texto, wamid, status_entrega, motivo_erro } = req.body || {};
+if (!telefone || !texto) {
+return res.status(400).json({ ok: false, erro: "telefone e texto sao obrigatorios" });
+}
+const numero = String(telefone).replace(/\D/g, "");
+const { error } = await supabase.from("mensagens").insert({ telefone: numero, tipo: tipo || "sara", texto, wamid: wamid || null, status_entrega: status_entrega || "enviado", motivo_erro: motivo_erro || null });
+if (error) {
+console.error("[Mensagem] ERRO ao gravar mensagem:", error.message);
+return res.status(500).json({ ok: false, erro: error.message });
+}
+console.log(`[Mensagem] OK gravada: ${numero} (${tipo || "sara"})`);
+res.json({ ok: true });
+} catch (e) {
+console.error("[Mensagem] EXCECAO:", e.message);
+res.status(500).json({ ok: false, erro: e.message });
+}
+});
 app.post("/notificar-lead", async (req, res) => {
   try {
     const bodyNormalizado = {};
