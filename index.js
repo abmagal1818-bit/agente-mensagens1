@@ -281,11 +281,26 @@ function limparTexto(str) {
 }
 
 function clienteEstaEmFluxoTroca(historicoConversa) {
-  const historico = (historicoConversa || []).slice(-10).map(m => m.content || "").join(" ").toLowerCase();
-  return historico.includes("tenho um") || historico.includes("meu carro") ||
-    historico.includes("na troca") || historico.includes("pra troca") ||
-    historico.includes("dar na troca") || historico.includes("mandar umas fotos") ||
-    historico.includes("manda umas fotos");
+  const mensagensRecentes = (historicoConversa || []).slice(-10);
+  const historico = mensagensRecentes.map(m => m.content || "").join(" ").toLowerCase();
+  const frasesCliente = [
+    "tenho um", "tenho uma", "meu carro", "na troca", "pra troca", "de troca",
+    "dar na troca", "dou na troca", "mandar umas fotos", "manda umas fotos",
+    "mandar as fotos", "vou mandar fotos", "tirar umas fotos", "tiro umas fotos",
+    "tirar as fotos", "que tinha troca", "falei que tinha troca"
+  ];
+  if (frasesCliente.some(f => historico.includes(f))) return true;
+  // Cobre tambem o caso em que e a propria Sarah, nas ultimas mensagens, quem esta
+  // claramente conduzindo a avaliacao do carro do cliente (perguntando km/estado/versao/
+  // documentacao) -- o cliente as vezes descreve o carro dele com frases que nao batem com
+  // nenhuma das combinacoes fixas acima (ex: relato solto em audio transcrito).
+  const frasesSara = [
+    "avaliacao certinha", "fazer uma avaliacao", "avaliar direitinho", "qual a versao",
+    "quantos km ela", "km ela ta rodando", "km ela esta rodando", "documentacao em dia",
+    "estado geral dela", "dar ela na troca", "avaliacao de troca", "avaliacao da sua"
+  ];
+  const mensagensSara = mensagensRecentes.filter(m => m.role === "assistant").map(m => (m.content || "").toLowerCase()).join(" ");
+  return frasesSara.some(f => mensagensSara.includes(f));
 }
 
 function ehMensagemSimples(texto) {
@@ -640,7 +655,11 @@ async function salvarMensagem(telefone, tipo, texto, wamid = null) {
   try {
     console.log(`[Supabase] Salvando: ${telefone} | ${tipo}`);
     const tiposSemTruncamento = ["sara_fotos", "client_foto"];
-    const textoFinal = tiposSemTruncamento.includes(tipo) ? String(texto) : String(texto).substring(0, 500);
+    // A analise de fotos da troca ("[Cliente enviou N fotos. Analises: ...]") tambem nao pode
+    // ser cortada -- o corte em 500 chars perdia a avaliacao de quase todas as fotos, deixando
+    // so o comeco da primeira analise salvo no CRM.
+    const ehAnaliseFotosCliente = tipo === "client" && typeof texto === "string" && texto.startsWith("[Cliente enviou");
+    const textoFinal = (tiposSemTruncamento.includes(tipo) || ehAnaliseFotosCliente) ? String(texto) : String(texto).substring(0, 500);
     const { data, error } = await supabase.from("mensagens").insert({
       telefone, tipo, texto: textoFinal, wamid, status_entrega: wamid ? "enviado" : null
     }).select("id").single();
@@ -1075,8 +1094,9 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
 async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, caption = "") {
   const numero = from.replace(/\D/g, "");
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
-  const legenda = `📸 *Foto recebida de ${formatado}*${caption ? `\nLegenda do cliente: "${caption}"` : ""}\n\n*Análise da Sarah:*\n${analise}`;
+  const legenda = `📸 *Foto recebida de ${formatado}*${caption ? `\nLegenda do cliente: "${caption}"` : ""}\n\n*Analise da Sarah:*\n${analise}`;
   try {
+    // Passo 1: upload da imagem para obter um media_id valido para envio
     const formData = new FormData();
     formData.append("file", Buffer.from(imageBuffer), { filename: "foto.jpg", contentType: mimeType });
     formData.append("messaging_product", "whatsapp");
@@ -1085,19 +1105,51 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     );
     const novoMediaId = uploadRes.data.id;
 
+    // Passo 2: envia a imagem usando o media_id obtido
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, type: "image", image: { id: novoMediaId, caption: legenda.substring(0, 1024) } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
     );
     console.log(`[Foto→Consultor] ✅ Repassada foto de ${from}`);
+    await registrarEnvioFotoConsultor(from, analise, caption, true, null);
+    return true;
   } catch (e) {
-    console.error(`[Foto→Consultor] Erro ao reenviar imagem (tentando só texto):`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+    console.error(`[Foto→Consultor] Erro ao reenviar imagem (tentando so texto):`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
+    // Fallback: se o upload/reenvio da imagem falhar, ao menos manda a
+    // analise em texto para nao perder a informacao completamente.
     try {
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-        { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: legenda + "\n\n⚠️ (não foi possível reenviar a imagem original)" } },
+        { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: legenda + "\n\n⚠️ (nao foi possivel reenviar a imagem original)" } },
         { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
       );
-    } catch (e2) { console.error(`[Foto→Consultor] Erro também no fallback de texto:`, e2.message); }
+      await registrarEnvioFotoConsultor(from, analise, caption, true, `Imagem falhou, enviado como texto: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
+      return true;
+    } catch (e2) {
+      console.error(`[Foto→Consultor] Erro tambem no fallback de texto:`, e2.message);
+      // Nem a imagem nem o texto chegaram ao consultor -- sem isso, a foto de troca
+      // some sem deixar rastro nenhum. Salva como alerta pendente (mesmo padrao ja
+      // usado para notificacoes de texto quando a janela de 24h fecha) para aparecer
+      // no /painel.
+      try {
+        await supabase.from("alertas_pendentes").insert({
+          texto: `📸 *Falha ao repassar foto de troca*\nCliente: ${formatado}\n${caption ? `Legenda: "${caption}"\n` : ""}\n*Analise da Sarah:*\n${analise}\n\n⚠️ Nem a imagem nem o texto chegaram ao WhatsApp do consultor (erro: ${e2.message}). Confira a conversa no CRM.`
+        });
+      } catch (e3) { console.error("[Foto→Consultor] Erro ao salvar alerta pendente:", e3.message); }
+      await registrarEnvioFotoConsultor(from, analise, caption, false, e2.message);
+      return false;
+    }
+  }
+}
+
+// Registra no Supabase cada tentativa de repasse de foto ao consultor (sucesso ou falha).
+// Antes, esse envio nao deixava nenhum rastro no banco -- se o push direto pro WhatsApp
+// pessoal falhasse (ex: janela de 24h fechada, erro de rede), a foto de avaliacao de troca
+// se perdia silenciosamente e ninguem percebia.
+async function registrarEnvioFotoConsultor(telefone, analise, caption, sucesso, erro) {
+  try {
+    await supabase.from("fotos_consultor_log").insert({ telefone, analise, legenda_cliente: caption || null, sucesso, erro });
+  } catch (e) {
+    console.error("[Foto→Consultor] Erro ao registrar log em fotos_consultor_log:", e.message);
   }
 }
 
@@ -2065,7 +2117,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     }
   }
 
-  const ehTextoNormal = !text.startsWith("[Cliente enviou foto") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
+  const ehTextoNormal = !text.startsWith("[Cliente enviou") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
   const resultadoFotos = ehTextoNormal && clienteEstaPedindoFotosDoEstoque(text, conversas[from]);
   const clientePedindoFotos = resultadoFotos && (!jaEnviouFotos || resultadoFotos === "adicional");
@@ -2241,6 +2293,27 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   }
 }
 
+function agendarFechamentoGrupoFotos(from, caption) {
+  const grupo = filaFotos[from];
+  if (!grupo) return;
+  if (grupo.timer) clearTimeout(grupo.timer);
+  grupo.timer = setTimeout(async () => {
+    const g = filaFotos[from];
+    if (!g) return;
+    if (g.pendentes > 0) {
+      // ainda existe alguma foto do grupo sendo analisada (download + Claude vision) --
+      // fechar agora perderia essa foto, que sairia sozinha depois em outro grupo (era
+      // exatamente isso que causava o "9 fotos" quando o cliente mandava 10). Reagenda
+      // em vez de fechar.
+      agendarFechamentoGrupoFotos(from, caption);
+      return;
+    }
+    const analises = [...g.analises];
+    delete filaFotos[from];
+    if (analises.length > 0) await processarFotosAgrupadas(from, analises);
+    else await processarMensagemNaFila(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
+  }, 3000);
+}
 async function processarFotosAgrupadas(from, analises) {
   const texto = analises.length === 1
     ? `[Cliente enviou foto. Análise: ${analises[0]}]`
@@ -2555,8 +2628,8 @@ app.post("/webhook", async (req, res) => {
         );
       } else if (msg.type === "image") {
         const caption = msg.image?.caption || "";
-        if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
-        if (filaFotos[from].timer) clearTimeout(filaFotos[from].timer);
+        if (!filaFotos[from]) filaFotos[from] = { analises: [], pendentes: 0, timer: null };
+        filaFotos[from].pendentes++;
         const mediaId = msg.image.id;
         const mimeType = msg.image.mime_type || "image/jpeg";
         try {
@@ -2567,15 +2640,14 @@ app.post("/webhook", async (req, res) => {
           await salvarMensagem(from, "client_foto", JSON.stringify({ mediaId, url: null, caption, mimeType }));
         }
         const analise = await analisarImagem(mediaId, caption, from);
-        if (!filaFotos[from]) filaFotos[from] = { analises: [], timer: null };
+        // Cada foto chega em um webhook separado e e analisada de forma assincrona. Se o
+        // cliente manda varias fotos rapido, os tempos de analise variam -- por isso usamos
+        // um contador de analises pendentes em vez de so um timer: o grupo so fecha quando
+        // o timer expira E nao ha nenhuma analise em andamento (ver agendarFechamentoGrupoFotos).
+        if (!filaFotos[from]) filaFotos[from] = { analises: [], pendentes: 0, timer: null };
         if (analise) filaFotos[from].analises.push(analise);
-        filaFotos[from].timer = setTimeout(async () => {
-          if (!filaFotos[from]) return;
-          const analises = [...filaFotos[from].analises];
-          delete filaFotos[from];
-          if (analises.length > 0) await processarFotosAgrupadas(from, analises);
-          else await processarMensagemNaFila(from, `[Cliente enviou foto${caption ? `: ${caption}` : ""}]`);
-        }, 3000);
+        filaFotos[from].pendentes = Math.max(0, (filaFotos[from].pendentes || 1) - 1);
+        agendarFechamentoGrupoFotos(from, caption);
       }
     } catch (e) {
       console.error("Erro:", e.message);
