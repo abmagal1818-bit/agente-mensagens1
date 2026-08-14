@@ -1334,7 +1334,19 @@ async function analisarImagem(mediaId, caption, from) {
 
     return analise;
   } catch (e) {
-    if (e.response) await notificarFalhaApiClaude(e, `Análise de imagem (${from || "desconhecido"})`);
+    if (e.response) {
+            await notificarFalhaApiClaude(e, `Análise de imagem (${from || "desconhecido"})`);
+    } else {
+            // Falha ao baixar ou resolver a mídia do cliente na Meta (rede, timeout,
+            // mídia expirada, rate limit) — antes isso só ia pro console.error e a
+            // foto do cliente sumia sem deixar nenhum rastro pra conferência depois.
+            console.error(`[Foto→Análise] Falha ao baixar/processar mídia de ${from || "desconhecido"} (media ${mediaId}):`, e.message);
+            try {
+                      await supabase.from("alertas_pendentes").insert({
+                                  texto: `⚠️ Falha ao processar foto de cliente (${from || "desconhecido"}, mediaId ${mediaId}): ${e.message}`
+                      });
+            } catch (e2) { console.error("[Foto→Análise] Erro ao salvar alerta pendente:", e2.message); }
+    }
     return null;
   }
 }
