@@ -607,6 +607,91 @@ Responda:
   }
 }
 
+function extrairPropostaFinanceira(texto) {
+  if (!texto) return null;
+  const t = texto.replace(/\u00A0/g, " ");
+  const parseValor = (s) => {
+    if (!s) return null;
+    const limpo = String(s).replace(/[Rr]\$\s*/g, "").trim();
+    const n = Number(limpo.replace(/\./g, "").replace(",", "."));
+    return isNaN(n) || n <= 0 ? null : n;
+  };
+  const entradaMatch = t.match(/r\$\s*([\d.,]+)\s*(?:de\s+)?entrada/i) || t.match(/entrada\s*(?:de\s*)?r\$\s*([\d.,]+)/i);
+  const parcelaMatch = t.match(/(\d{1,3})\s*promiss[óo]rias?\s*de\s*r\$\s*([\d.,]+)/i) || t.match(/(\d{1,3})\s*x\s*(?:de\s*)?r\$\s*([\d.,]+)/i);
+  const totalMatch = t.match(/total[^\d]{0,10}r\$\s*([\d.,]+)/i) || t.match(/r\$\s*([\d.,]+)\s*(?:no\s+)?total/i) || t.match(/fica(?:ria)?\s+em\s+r\$\s*([\d.,]+)/i);
+  if (entradaMatch || parcelaMatch) {
+    const entrada = entradaMatch ? parseValor(entradaMatch[1]) : 0;
+    let totalParcelas = 0;
+    if (parcelaMatch) {
+      const qtd = Number(parcelaMatch[1]);
+      const valorParcela = parseValor(parcelaMatch[2]);
+      if (!isNaN(qtd) && valorParcela) totalParcelas = qtd * valorParcela;
+    }
+    const total = (entrada || 0) + totalParcelas;
+    if (!total) return null;
+    return { entrada: entrada || 0, totalParcelas, total };
+  }
+  if (totalMatch) {
+    const total = parseValor(totalMatch[1]);
+    if (!total) return null;
+    return { entrada: 0, totalParcelas: 0, total };
+  }
+  return null;
+}
+
+// Verifica se a resposta que a Sara esta prestes a mandar propoe um total
+// (entrada + parcelas, ou total a vista) diferente do preco de tabela do
+// veiculo em discussao. Cobre o caso em que NINGUEM disse a palavra
+// "desconto" -- a propria Sara, ao recalcular a proposta do cliente,
+// chegou a um valor fora do preco. Reusa o mesmo mecanismo de aprovacao
+// (descontos_pendentes + notificacao AUTORIZO/NEGO) ja usado em
+// processarDesconto(), so que disparado a partir da resposta gerada,
+// nao da mensagem do cliente.
+async function verificarPropostaForaDoPreco(from, reply, veiculo) {
+  if (!veiculo || !veiculo.preco) return null;
+  const proposta = extrairPropostaFinanceira(reply);
+  if (!proposta) return null;
+  const precoTabela = Number(veiculo.preco);
+  if (!precoTabela) return null;
+  const diff = Math.abs(proposta.total - precoTabela);
+  if (diff <= 20) return null;
+
+  console.log(`[PropostaForaDoPreco] ${from}: proposta R$ ${proposta.total} vs tabela R$ ${precoTabela}`);
+
+  const info = {
+    veiculo: veiculo.modelo || null,
+    preco_original: precoTabela,
+    preco_solicitado: proposta.total,
+    pagamento: `entrada R$ ${proposta.entrada} + parcelas R$ ${proposta.totalParcelas}`,
+    origem: "ajuste_automatico_sara"
+  };
+  await salvarDescontoPendente(from, info);
+
+  const numero = from.replace(/\D/g, "");
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
+  const msgConsultor = `⚠️ *Proposta fora do preco de tabela*
+Cliente: ${formatado}
+Veiculo: *${info.veiculo || "nao identificado"}*
+Preco de tabela: R$ ${precoTabela}
+Sara ia confirmar: *R$ ${proposta.total}* (${info.pagamento})
+
+A Sara NAO enviou essa condicao ao cliente — esta aguardando sua decisao.
+Responda:
+✅ *AUTORIZO* — para autorizar
+❌ *NEGO* — para negar`;
+
+  try {
+    await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: msgConsultor } },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+  } catch (e) {
+    console.error("[PropostaForaDoPreco] Erro ao notificar consultor:", e.message);
+  }
+
+  return "Deixa eu confirmar essa condicao com nossa equipe rapidinho e ja te retorno! 😊";
+}
+
 async function extrairContextoConversa(textos, ehSimples = false, from = null) {
   if (ehSimples) return { marcaTroca: null, modeloTroca: null, anoTroca: null, modeloBuscado: null, anoBuscado: null };
   const textoRecente = textos.slice(-3).join(" ").toLowerCase();
@@ -2273,7 +2358,12 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     );
 
     const replyRaw = claude.data.content[0].text;
-    const reply = limparRespostaIA(replyRaw);
+    let reply = limparRespostaIA(replyRaw);
+    if (!clienteAindaTemPendente) {
+      const veiculoDaProposta = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+      const respostaBloqueada = await verificarPropostaForaDoPreco(from, reply, veiculoDaProposta);
+      if (respostaBloqueada) reply = respostaBloqueada;
+    }
     conversas[from].push({ role: "assistant", content: reply });
 
     const respMeta = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
