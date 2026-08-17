@@ -131,6 +131,7 @@ const ultimaNotificacao = {};
 const conversasVisualizadas = {};
 const cacheContextoConversa = {};
 const ultimaMensagemCliente = {};
+const veiculoAtualCache = {};
 
 const coletaCredito = {};
 
@@ -1037,7 +1038,7 @@ async function gerarMensagemFollowUp(followup) {
       visita_nao_confirmada: `Você é Sarah, vendedora da Premium Automarcas. O cliente tinha agendado uma visita pra loja sobre o ${veiculo} mas não temos confirmação de que ele veio. Mensagem tipo "Verifiquei que não conseguiu comparecer no horário agendado. Gostaria de reagendar?" — natural, sem cobrar, sugerindo reagendar pra mais tarde ou outro dia. Máximo 3 linhas.`
     };
     const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: prompts[followup.motivo] || prompts.vai_pensar }] },
+      { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: (prompts[followup.motivo] || prompts.vai_pensar) + (followup.veiculo_interesse ? "" : "\n\nIMPORTANTE: nao sabemos qual veiculo especifico e o de interesse do cliente. NAO cite nem invente nenhuma marca ou modelo de carro por nome - fale de forma generica (\"nossos veiculos\", \"o carro que voce viu\").") }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     return res.data.content[0].text;
@@ -1513,6 +1514,40 @@ function contarVeiculosAmbiguos(texto, estoque) {
   return candidatos;
 }
 
+async function obterVeiculoAtualConversa(from, texto, historicoConversa) {
+  const encontrado = encontrarVeiculoNoContexto(texto, historicoConversa, estoqueAtual);
+  if (encontrado) {
+    veiculoAtualCache[from] = encontrado;
+    salvarVeiculoAtualPersistido(from, encontrado).catch(() => {});
+    return encontrado;
+  }
+  if (veiculoAtualCache[from]) return veiculoAtualCache[from];
+  const persistido = await carregarVeiculoAtualPersistido(from);
+  if (persistido) veiculoAtualCache[from] = persistido;
+  return persistido;
+}
+
+async function salvarVeiculoAtualPersistido(telefone, veiculo) {
+  try {
+    const nome = `${limparTexto(veiculo.modelo || "")} ${veiculo.ano || ""}`.trim().slice(0, 100);
+    if (!nome) return;
+    await supabase.from("clientes").upsert({ telefone, veiculo_interesse: nome }, { onConflict: "telefone" });
+  } catch (e) { console.error("[VeiculoAtual] Erro ao persistir:", e.message); }
+}
+
+async function carregarVeiculoAtualPersistido(telefone) {
+  try {
+    const { data } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", telefone).limit(1);
+    const nome = data?.[0]?.veiculo_interesse;
+    if (!nome) return null;
+    const nomeLower = String(nome).toLowerCase();
+    return estoqueAtual.find(v => {
+      const modelo = limparTexto(v.modelo || "").toLowerCase();
+      return modelo && (nomeLower.includes(modelo) || modelo.includes(nomeLower));
+    }) || null;
+  } catch (e) { return null; }
+}
+
 async function enviarFotosVeiculo(to, veiculo) {
   const fotos = (veiculo.fotos || []).slice(0, 10);
   if (!fotos.length) return false;
@@ -1559,7 +1594,7 @@ function formatarEstoque(modeloFiltro = null) {
   ).join("\n");
 }
 
-const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null, modeloMencionado = null, versaoIncerta = null) => {
+const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null, modeloMencionado = null, versaoIncerta = null, veiculoAtual = null) => {
   const agora = new Date();
   const dataHoraAtual = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   return `Você é Sarah, vendedora da Premium Automarcas, revendedora de veículos usados em Porto Alegre/RS.
@@ -1581,8 +1616,11 @@ PERFIL: Simpática, descontraída e profissional. Máximo 4 linhas por resposta 
 
 REGRA CRÍTICA — NUNCA MENCIONAR NOMES: Nunca cite "Augusto" ou qualquer nome pessoal. Use sempre "nosso consultor" ou "nossa equipe".
 
+${veiculoAtual ? `🚨 VEICULO EM DISCUSSAO NESTA CONVERSA: ${limparTexto(veiculoAtual.modelo || "")} ${veiculoAtual.ano || ""} - R$ ${Number(veiculoAtual.preco || 0).toLocaleString("pt-BR")}
+Este ja foi identificado como o veiculo em discussao nesta conversa (citado pelo cliente ou pelo anuncio de origem). Continue falando SOBRE ELE mesmo que o cliente mande uma mensagem curta, vaga ou generica (\"vi agora\", \"e ai?\", \"qual cidade?\", so um valor em R$, etc.) - mensagens vagas sao SEMPRE sobre este veiculo, nunca um convite pra trocar de assunto. So troque de veiculo se o cliente citar EXPLICITAMENTE outro modelo/marca pelo nome.` : ""}
+
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
-${formatarEstoque(modeloMencionado)}
+${formatarEstoque(veiculoAtual ? limparTexto(veiculoAtual.modelo || "") : modeloMencionado)}
 
 🚨 REGRA CRÍTICA DE PREÇOS — ABSOLUTA, SEM EXCEÇÕES:
 - Use EXATAMENTE os preços do estoque acima, caractere por caractere. NUNCA invente, estime, arredonde ou "lembre de cabeça" um valor.
@@ -2278,6 +2316,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   const isSimples = ehMensagemSimples(text);
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
   const { marcaTroca, modeloTroca, anoTroca, modeloBuscado, anoBuscado } = await extrairContextoConversa(todosTextos, isSimples, from);
+const veiculoAtual = await obterVeiculoAtualConversa(from, text, conversas[from]);
 
   let carroNaoDisponivel = null;
   if (modeloBuscado) {
@@ -2351,7 +2390,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       {
         model: "claude-sonnet-4-5",
         max_tokens: 500,
-        system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente, veiculosAmbiguos, modeloBuscado, versaoIncerta),
+        system: SYSTEM_PROMPT(fipeInfo, aprendizadosExtra, carroNaoDisponivel, clienteAindaTemPendente, veiculosAmbiguos, modeloBuscado, versaoIncerta, veiculoAtual),
         messages: conversas[from].slice(-30)
       },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
@@ -2715,11 +2754,18 @@ app.post("/webhook", async (req, res) => {
         const text = msg.text?.body;
         if (!text) return;
         console.log(`Texto de ${from}: ${text}`);
-        if (textoReferral && !conversas[from]?.length) {
-          if (!conversas[from]) conversas[from] = [];
-          conversas[from].push({ role: "user", content: textoReferral });
-          await salvarMensagem(from, "sistema", textoReferral);
-        }
+        if (textoReferral) {
+if (!conversas[from]) {
+const msgsExistentesReferral = await buscarMensagens(from);
+conversas[from] = msgsExistentesReferral.length > 0
+? msgsExistentesReferral.slice(-20).map(m => ({ role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant", content: m.texto || "" }))
+: [];
+}
+if (conversas[from].length === 0) {
+conversas[from].push({ role: "user", content: textoReferral });
+await salvarMensagem(from, "sistema", textoReferral);
+}
+}
         await processarMensagemNaFila(from, text);
       } else if (msg.type === "audio") {
         const texto = await transcreverAudio(msg.audio.id);
