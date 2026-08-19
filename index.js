@@ -291,10 +291,6 @@ function clienteEstaEmFluxoTroca(historicoConversa) {
     "tirar as fotos", "que tinha troca", "falei que tinha troca"
   ];
   if (frasesCliente.some(f => historico.includes(f))) return true;
-  // Cobre tambem o caso em que e a propria Sarah, nas ultimas mensagens, quem esta
-  // claramente conduzindo a avaliacao do carro do cliente (perguntando km/estado/versao/
-  // documentacao) -- o cliente as vezes descreve o carro dele com frases que nao batem com
-  // nenhuma das combinacoes fixas acima (ex: relato solto em audio transcrito).
   const frasesSara = [
     "avaliacao certinha", "fazer uma avaliacao", "avaliar direitinho", "qual a versao",
     "quantos km ela", "km ela ta rodando", "km ela esta rodando", "documentacao em dia",
@@ -419,6 +415,7 @@ Cliente: ${formatado}
 Nome: *${dados.nome}*
 CPF: *${dados.cpf}*
 Nascimento: *${dados.nascimento}*
+CNH: *${dados.temCnh || "Não informado"}*
 ${dados.veiculo ? `Veículo de interesse: *${dados.veiculo}*` : "Veículo de interesse: não identificado"}
 ${dados.entrada ? `Valor de entrada: *${dados.entrada}*` : "Entrada: à combinar"}
 ${linkSeguro ? `\nVer todas as simulações: ${linkSeguro}` : ""}
@@ -438,7 +435,7 @@ async function salvarSimulacaoCredito(telefone, dados) {
   try {
     await supabase.from("simulacoes_credito").insert({
       telefone, nome: dados.nome, cpf: dados.cpf, nascimento: dados.nascimento,
-      veiculo: dados.veiculo || null, entrada: dados.entrada || null, status: "pendente"
+      veiculo: dados.veiculo || null, entrada: dados.entrada || null, tem_cnh: dados.temCnh || null, status: "pendente"
     });
     console.log(`[Crédito] ✅ Salvo no Supabase: ${telefone}`);
   } catch (e) {
@@ -610,7 +607,7 @@ Responda:
 
 function extrairPropostaFinanceira(texto) {
   if (!texto) return null;
-  const t = texto.replace(/\u00A0/g, " ");
+  const t = texto.replace(/ /g, " ");
   const parseValor = (s) => {
     if (!s) return null;
     const limpo = String(s).replace(/[Rr]\$\s*/g, "").trim();
@@ -640,14 +637,6 @@ function extrairPropostaFinanceira(texto) {
   return null;
 }
 
-// Verifica se a resposta que a Sara esta prestes a mandar propoe um total
-// (entrada + parcelas, ou total a vista) diferente do preco de tabela do
-// veiculo em discussao. Cobre o caso em que NINGUEM disse a palavra
-// "desconto" -- a propria Sara, ao recalcular a proposta do cliente,
-// chegou a um valor fora do preco. Reusa o mesmo mecanismo de aprovacao
-// (descontos_pendentes + notificacao AUTORIZO/NEGO) ja usado em
-// processarDesconto(), so que disparado a partir da resposta gerada,
-// nao da mensagem do cliente.
 async function verificarPropostaForaDoPreco(from, reply, veiculo) {
   if (!veiculo || !veiculo.preco) return null;
   const proposta = extrairPropostaFinanceira(reply);
@@ -741,9 +730,6 @@ async function salvarMensagem(telefone, tipo, texto, wamid = null) {
   try {
     console.log(`[Supabase] Salvando: ${telefone} | ${tipo}`);
     const tiposSemTruncamento = ["sara_fotos", "client_foto"];
-    // A analise de fotos da troca ("[Cliente enviou N fotos. Analises: ...]") tambem nao pode
-    // ser cortada -- o corte em 500 chars perdia a avaliacao de quase todas as fotos, deixando
-    // so o comeco da primeira analise salvo no CRM.
     const ehAnaliseFotosCliente = tipo === "client" && typeof texto === "string" && texto.startsWith("[Cliente enviou");
     const textoFinal = (tiposSemTruncamento.includes(tipo) || ehAnaliseFotosCliente) ? String(texto) : String(texto).substring(0, 500);
     const { data, error } = await supabase.from("mensagens").insert({
@@ -832,13 +818,6 @@ async function detectarEstagio(from, text, historico) {
   if (t.includes("vou pensar") || t.includes("vou falar") || t.includes("vou consultar") || t.includes("retorno")) { await atualizarEstagio(from, "aguardando"); return; }
   const { data } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
   const estagioAtual = data?.[0]?.estagio;
-  // Antes só marcava "quente" se o cliente nunca tivesse tido estágio salvo.
-  // Isso deixava um lead "frio" (por reativação/sumiço) preso nesse estágio
-  // pra sempre, mesmo depois de voltar a responder com algo comum ("oi",
-  // "bom dia") — e também impedia a régua de reativação de cancelar
-  // corretamente, já que ela depende desse estágio. Agora, se o cliente
-  // estava "frio" e mandou algo que não caiu em nenhuma regra de recusa
-  // acima, ele volta pra "quente".
   if (!estagioAtual || estagioAtual === "frio") await atualizarEstagio(from, "quente");
 }
 
@@ -882,12 +861,6 @@ async function buscarAprendizados() {
   } catch (e) { return []; }
 }
 
-// Parâmetro "nivel" (default 1) suporta a régua de reativação em múltiplos
-// toques (D+2 / D+4 / D+7) para leads que pararam de responder (motivo
-// "sumiu"). Os demais motivos continuam com disparo único, como antes.
-// O update de "enviado" agora filtra por motivo também — sem isso, agendar
-// o nível 2 de "sumiu" cancelaria por engano um follow-up pendente de outro
-// motivo (ex: "achou_caro") para o mesmo cliente.
 async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar, nivel = 1) {
   try {
     const agendadoPara = new Date();
@@ -948,9 +921,6 @@ async function verificarClientesSumidos() {
             const { data: cli } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", telefone).limit(1);
             veiculoInteresse = cli?.[0]?.veiculo_interesse || null;
           }
-          // Régua de reativação: nível 1 dispara em D+2. Se o cliente não
-          // responder, processarFollowUpsPendentes encadeia os próximos
-          // níveis (D+4 e D+7) automaticamente.
           await agendarFollowUp(telefone, "sumiu", veiculoInteresse, 2, 1);
           await atualizarEstagio(telefone, "frio");
         }
@@ -983,11 +953,6 @@ setInterval(verificarClientesSumidos, 60 * 60 * 1000);
 
 const TEMPLATE_FOLLOWUP = process.env.TEMPLATE_FOLLOWUP_NAME || "followup_generico";
 
-// Dias de espera até o PRÓXIMO nível da régua de reativação, contados a
-// partir do envio do nível atual. Nível 1 (D+2) é agendado em
-// verificarClientesSumidos(); daqui pra frente: nível 1→2 espera mais 2
-// dias (chegando a D+4 total), nível 2→3 espera mais 3 dias (D+7 total).
-// Depois do nível 3, a régua para — o lead fica "frio" sem novo disparo.
 const DIAS_PROXIMO_NIVEL = { 1: 2, 2: 3 };
 const NIVEL_MAXIMO_REATIVACAO = 3;
 
@@ -1021,9 +986,6 @@ async function gerarMensagemFollowUp(followup) {
   try {
     const veiculo = followup.veiculo_interesse || "nossos veículos";
     const nivel = followup.nivel || 1;
-    // Mensagens de "sumiu" variam de tom conforme o nível da régua — nível
-    // 1 (D+2) é leve, nível 2 (D+4) traz um gatilho de valor/disponibilidade,
-    // nível 3 (D+7) é a última tentativa antes de encerrar a régua.
     const promptsSumiu = {
       1: `Você é Sarah, vendedora da Premium Automarcas. Cliente parou de responder sobre ${veiculo} há poucos dias. Mensagem curta e leve para retomar, sem cobrar. Máximo 2 linhas.`,
       2: `Você é Sarah, vendedora da Premium Automarcas. Cliente sumiu depois de demonstrar interesse no ${veiculo}. Mencione que o carro ainda está disponível e pergunte se ainda tem interesse. Máximo 3 linhas.`,
@@ -1061,11 +1023,6 @@ async function processarFollowUpsPendentes() {
           continue;
         }
       }
-      // Para a régua de reativação (motivo "sumiu"): cancela se o cliente já
-      // respondeu depois que este nível foi agendado. Usa
-      // ultima_mensagem_cliente (mais confiável que "estagio", que só sai de
-      // "frio" em certas frases específicas) comparado com a criação deste
-      // follow-up.
       if (followup.motivo === "sumiu") {
         const { data: clienteAtualSumiu } = await supabase.from("clientes").select("estagio, ultima_mensagem_cliente").eq("telefone", followup.telefone).limit(1);
         const cliSumiu = clienteAtualSumiu?.[0];
@@ -1101,8 +1058,6 @@ async function processarFollowUpsPendentes() {
         conversas[followup.telefone].push({ role: "assistant", content: mensagem });
         await notificarAugusto(followup.telefone, `[FollowUp]: ${mensagem}`, false);
 
-        // Encadeia o próximo nível da régua de reativação (D+2 → D+4 → D+7),
-        // se ainda não chegou no nível máximo.
         if (followup.motivo === "sumiu") {
           const nivelAtual = followup.nivel || 1;
           const proximoNivel = nivelAtual + 1;
@@ -1182,7 +1137,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
   const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : from;
   const legenda = `📸 *Foto recebida de ${formatado}*${caption ? `\nLegenda do cliente: "${caption}"` : ""}\n\n*Analise da Sarah:*\n${analise}`;
   try {
-    // Passo 1: upload da imagem para obter um media_id valido para envio
     const formData = new FormData();
     formData.append("file", Buffer.from(imageBuffer), { filename: "foto.jpg", contentType: mimeType });
     formData.append("messaging_product", "whatsapp");
@@ -1191,7 +1145,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     );
     const novoMediaId = uploadRes.data.id;
 
-    // Passo 2: envia a imagem usando o media_id obtido
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, type: "image", image: { id: novoMediaId, caption: legenda.substring(0, 1024) } },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
@@ -1201,8 +1154,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
     return true;
   } catch (e) {
     console.error(`[Foto→Consultor] Erro ao reenviar imagem (tentando so texto):`, e.response?.data ? JSON.stringify(e.response.data) : e.message);
-    // Fallback: se o upload/reenvio da imagem falhar, ao menos manda a
-    // analise em texto para nao perder a informacao completamente.
     try {
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to: NUMERO_AUGUSTO, text: { body: legenda + "\n\n⚠️ (nao foi possivel reenviar a imagem original)" } },
@@ -1212,10 +1163,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
       return true;
     } catch (e2) {
       console.error(`[Foto→Consultor] Erro tambem no fallback de texto:`, e2.message);
-      // Nem a imagem nem o texto chegaram ao consultor -- sem isso, a foto de troca
-      // some sem deixar rastro nenhum. Salva como alerta pendente (mesmo padrao ja
-      // usado para notificacoes de texto quando a janela de 24h fecha) para aparecer
-      // no /painel.
       try {
         await supabase.from("alertas_pendentes").insert({
           texto: `📸 *Falha ao repassar foto de troca*\nCliente: ${formatado}\n${caption ? `Legenda: "${caption}"\n` : ""}\n*Analise da Sarah:*\n${analise}\n\n⚠️ Nem a imagem nem o texto chegaram ao WhatsApp do consultor (erro: ${e2.message}). Confira a conversa no CRM.`
@@ -1227,10 +1174,6 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
   }
 }
 
-// Registra no Supabase cada tentativa de repasse de foto ao consultor (sucesso ou falha).
-// Antes, esse envio nao deixava nenhum rastro no banco -- se o push direto pro WhatsApp
-// pessoal falhasse (ex: janela de 24h fechada, erro de rede), a foto de avaliacao de troca
-// se perdia silenciosamente e ninguem percebia.
 async function registrarEnvioFotoConsultor(telefone, analise, caption, sucesso, erro) {
   try {
     await supabase.from("fotos_consultor_log").insert({ telefone, analise, legenda_cliente: caption || null, sucesso, erro });
@@ -1371,8 +1314,8 @@ async function consultarFipe(marca, modelo, ano) {
       if (anoFipe) {
         const valorRes = await axios.get(`https://parallelum.com.br/fipe/api/v1/carros/marcas/${marcaFipe.codigo}/modelos/${c.codigo}/anos/${anoFipe.codigo}`);
         valorRes.data._incerto = _fipeIncerto;
-    valorRes.data._candidatos = candidatos.map(x => x.nome).slice(0, 5);
-    fipeCache[chave] = valorRes.data;
+        valorRes.data._candidatos = candidatos.map(x => x.nome).slice(0, 5);
+        fipeCache[chave] = valorRes.data;
         console.log(`✅ FIPE: ${valorRes.data.Modelo} = ${valorRes.data.Valor}`);
         return valorRes.data;
       }
@@ -1421,17 +1364,14 @@ async function analisarImagem(mediaId, caption, from) {
     return analise;
   } catch (e) {
     if (e.response) {
-            await notificarFalhaApiClaude(e, `Análise de imagem (${from || "desconhecido"})`);
+      await notificarFalhaApiClaude(e, `Análise de imagem (${from || "desconhecido"})`);
     } else {
-            // Falha ao baixar ou resolver a mídia do cliente na Meta (rede, timeout,
-            // mídia expirada, rate limit) — antes isso só ia pro console.error e a
-            // foto do cliente sumia sem deixar nenhum rastro pra conferência depois.
-            console.error(`[Foto→Análise] Falha ao baixar/processar mídia de ${from || "desconhecido"} (media ${mediaId}):`, e.message);
-            try {
-                      await supabase.from("alertas_pendentes").insert({
-                                  texto: `⚠️ Falha ao processar foto de cliente (${from || "desconhecido"}, mediaId ${mediaId}): ${e.message}`
-                      });
-            } catch (e2) { console.error("[Foto→Análise] Erro ao salvar alerta pendente:", e2.message); }
+      console.error(`[Foto→Análise] Falha ao baixar/processar mídia de ${from || "desconhecido"} (media ${mediaId}):`, e.message);
+      try {
+        await supabase.from("alertas_pendentes").insert({
+          texto: `⚠️ Falha ao processar foto de cliente (${from || "desconhecido"}, mediaId ${mediaId}): ${e.message}`
+        });
+      } catch (e2) { console.error("[Foto→Análise] Erro ao salvar alerta pendente:", e2.message); }
     }
     return null;
   }
@@ -1586,7 +1526,7 @@ function formatarEstoque(modeloFiltro = null) {
     return lista.map(v => {
       const cabecalho = `${limparTexto(v.modelo || "")} ${v.ano || ""} - ${Number(v.km || 0).toLocaleString("pt-BR")} km - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`;
       const descricaoCompleta = limparTexto(v.descricao || "").substring(0, 500);
-      return descricaoCompleta ? `${cabecalho}\n  Detalhes do anúncio: ${descricaoCompleta}` : cabecalho;
+      return descricaoCompleta ? `${cabecalho}\n Detalhes do anúncio: ${descricaoCompleta}` : cabecalho;
     }).join("\n\n");
   }
   return estoqueAtual.map(v =>
@@ -1617,7 +1557,7 @@ PERFIL: Simpática, descontraída e profissional. Máximo 4 linhas por resposta 
 REGRA CRÍTICA — NUNCA MENCIONAR NOMES: Nunca cite "Augusto" ou qualquer nome pessoal. Use sempre "nosso consultor" ou "nossa equipe".
 
 ${veiculoAtual ? `🚨 VEICULO EM DISCUSSAO NESTA CONVERSA: ${limparTexto(veiculoAtual.modelo || "")} ${veiculoAtual.ano || ""} - R$ ${Number(veiculoAtual.preco || 0).toLocaleString("pt-BR")}
-Este ja foi identificado como o veiculo em discussao nesta conversa (citado pelo cliente ou pelo anuncio de origem). Continue falando SOBRE ELE mesmo que o cliente mande uma mensagem curta, vaga ou generica (\"vi agora\", \"e ai?\", \"qual cidade?\", so um valor em R$, etc.) - mensagens vagas sao SEMPRE sobre este veiculo, nunca um convite pra trocar de assunto. So troque de veiculo se o cliente citar EXPLICITAMENTE outro modelo/marca pelo nome.` : ""}
+Este ja foi identificado como o veiculo em discussao nesta conversa (citado pelo cliente ou pelo anuncio de origem). Continue falando SOBRE ELE mesmo que o cliente mande uma mensagem curta, vaga ou generica ("vi agora", "e ai?", "qual cidade?", so um valor em R$, etc.) - mensagens vagas sao SEMPRE sobre este veiculo, nunca um convite pra trocar de assunto. So troque de veiculo se o cliente citar EXPLICITAMENTE outro modelo/marca pelo nome.` : ""}
 
 ESTOQUE ATUAL (${ultimaAtualizacao || "carregando..."}):
 ${formatarEstoque(veiculoAtual ? limparTexto(veiculoAtual.modelo || "") : modeloMencionado)}
@@ -1684,7 +1624,6 @@ FOTOS: Quando o sistema confirmar [fotos enviadas], diga: "Mandei as fotos! O qu
 
 PAGAMENTO: BV, Santander, PAN, Daycoval, Bradesco, C6, Itaú, Cartão, Consórcio, À vista
 
-
 Etapa 1: km, estado geral, revisões, fotos 📸
 - Se o sistema já forneceu uma [Análise de foto] com informações sobre estado geral, pontos positivos ou pontos de atenção do veículo, APROVEITE essas informações. NÃO pergunte de novo sobre algo que a análise da foto já respondeu (ex: não pergunte "como está o estado geral?" se a análise já descreveu o estado). Pergunte apenas o que ainda falta (tipicamente: quilometragem, se não tiver sido informada).
 Etapa 2: Agradeça as fotos
@@ -1693,7 +1632,9 @@ Etapa 3 (só após tudo): ${versaoIncerta ? `Encontramos mais de uma versão pos
 QUANDO ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
 QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
 
-🚨 FINANCIAMENTO — REGRA CRÍTICA E ABSOLUTA: Você NUNCA deve calcular, estimar ou informar nenhum valor de parcela diretamente na conversa, mesmo que o cliente peça, insista ou pareça impaciente. Isso vale mesmo que você "saiba" a fórmula ou a taxa — o cálculo só pode ser feito depois de coletar nome, CPF e data de nascimento, porque o valor real depende da aprovação na financeira, não de uma conta simples. Se o cliente perguntar sobre parcela, financiamento, ou quanto ficaria por mês, diga algo como "Posso fazer uma simulação certinha pra você! Só preciso de alguns dados rapidinho" e deixe o sistema iniciar a coleta. NUNCA mencione números de parcela, taxa de juros, ou fórmulas de cálculo na sua resposta.
+🚨 FINANCIAMENTO — REGRA CRÍTICA E ABSOLUTA: Você NUNCA deve calcular, estimar ou informar nenhum valor de parcela diretamente na conversa, mesmo que o cliente peça, insista ou pareça impaciente. Isso vale mesmo que você "saiba" a fórmula ou a taxa — o cálculo só pode ser feito depois de coletar nome, CPF, data de nascimento e se o cliente tem CNH, porque o valor real depende da aprovação na financeira, não de uma conta simples. Se o cliente perguntar sobre parcela, financiamento, ou quanto ficaria por mês, diga algo como "Posso fazer uma simulação certinha pra você! Só preciso de alguns dados rapidinho" e deixe o sistema iniciar a coleta. NUNCA mencione números de parcela, taxa de juros, ou fórmulas de cálculo na sua resposta.
+
+🚨 CNH — REGRA CRÍTICA: Se o cliente mencionar espontaneamente que não tem CNH (carteira de motorista), antes ou fora da coleta estruturada de dados de financiamento, você NUNCA deve dar conselhos, sugestões ou alternativas por conta própria (não sugira renovar a CNH, não sugira juntar uma entrada como alternativa, não invente outras ideias). Apenas confirme educadamente que anotou a informação e que o consultor vai avaliar as opções com ele — nada além disso. Essa decisão (a qual financeira encaminhar, alternativas de negociação) é exclusivamente do consultor humano. Se a coleta de dados de financiamento ainda não tiver perguntado sobre CNH, o sistema já inclui essa pergunta automaticamente na etapa correta — você não precisa (e não deve) perguntar por conta própria fora desse fluxo.
 
 REGRAS ABSOLUTAS:
 - Primeira msg: "Oi! 😊 Aqui é a Sarah da Premium Automarcas!"
@@ -2055,9 +1996,9 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       estado.nome = palavrasNome.join(" ");
       estado.cpf = cpfNaMensagem;
       estado.nascimento = dataNaMensagem;
-      estado.etapa = "entrada";
+      estado.etapa = "cnh";
       await salvarColetaCreditoPendente(from, estado);
-      const msg = `Obrigada, ${estado.nome.split(" ")[0]}! 😊 Recebi seus dados. Você tem algum valor de entrada para dar?`;
+      const msg = `Obrigada, ${estado.nome.split(" ")[0]}! 😊 Recebi seus dados. Só mais uma coisa: você tem CNH (carteira de motorista)?`;
       conversas[from].push({ role: "assistant", content: msg });
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
         { messaging_product: "whatsapp", to: from, text: { body: msg } },
@@ -2067,31 +2008,31 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       return;
     }
 
-        if (estado.etapa === "aguardando_veiculo") {
-                const veiculoConfirmado = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-                if (veiculoConfirmado) {
-                          estado.etapa = "nome";
-                          estado.veiculo = `${limparTexto(veiculoConfirmado.modelo)} ${veiculoConfirmado.ano || ""}`.trim();
-                          await salvarColetaCreditoPendente(from, estado);
-                          const msg = "Perfeito! Pra fazer a simulação preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?";
-                          conversas[from].push({ role: "assistant", content: msg });
-                          await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-                                           { messaging_product: "whatsapp", to: from, text: { body: msg } },
-                                           { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-                                                   );
-                          await salvarMensagem(from, "sara", msg);
-                          return;
-                }
-                const msg = "Sem problema! Me confirma qual carro do nosso estoque você quer financiar, que eu já sigo com a simulação. 😊";
-                conversas[from].push({ role: "assistant", content: msg });
-                await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
-                                 { messaging_product: "whatsapp", to: from, text: { body: msg } },
-                                 { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
-                                       );
-                await salvarMensagem(from, "sara", msg);
-                return;
-        }
-    
+    if (estado.etapa === "aguardando_veiculo") {
+      const veiculoConfirmado = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+      if (veiculoConfirmado) {
+        estado.etapa = "nome";
+        estado.veiculo = `${limparTexto(veiculoConfirmado.modelo)} ${veiculoConfirmado.ano || ""}`.trim();
+        await salvarColetaCreditoPendente(from, estado);
+        const msg = "Perfeito! Pra fazer a simulação preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      }
+      const msg = "Sem problema! Me confirma qual carro do nosso estoque você quer financiar, que eu já sigo com a simulação. 😊";
+      conversas[from].push({ role: "assistant", content: msg });
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: from, text: { body: msg } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await salvarMensagem(from, "sara", msg);
+      return;
+    }
+
     if (estado.etapa === "nome") {
       const nomeDigitado = text.trim();
       const palavrasNaoNome = ["entrada", "parcela", "financi", "desconto", "preço", "preco", "valor", "restante", "seria", "quero", "queria", "gostaria", "consegue", "consigo", "aguardo", "aguardando", "imagens", "espero", "esperando", "então", "entao", "beleza", "obrigado", "obrigada", "posso", "preciso", "foto", "fotos"];
@@ -2156,6 +2097,37 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       const dataNasc = extrairDataNascimento(text);
       if (dataNasc) {
         estado.nascimento = dataNasc;
+        estado.etapa = "cnh";
+        await salvarColetaCreditoPendente(from, estado);
+        const msg = "Só mais uma coisa: você tem CNH (carteira de motorista)? 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      } else {
+        const msg = "Não consegui entender a data. Pode mandar no formato dia/mês/ano? Ex: 15/03/1990 😊";
+        conversas[from].push({ role: "assistant", content: msg });
+        await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+          { messaging_product: "whatsapp", to: from, text: { body: msg } },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+        );
+        await salvarMensagem(from, "sara", msg);
+        return;
+      }
+    }
+
+    if (estado.etapa === "cnh") {
+      const tCnh = text.toLowerCase().trim();
+      const respostasSimCnh = ["sim", "tenho", "possuo", "s", "claro", "afirmativo"];
+      const respostasNaoCnh = ["não", "nao", "n", "negativo", "não tenho", "nao tenho", "não possuo", "nao possuo"];
+      const disseNaoCnh = respostasNaoCnh.some(p => tCnh === p || tCnh.includes(p));
+      const disseSimCnh = !disseNaoCnh && respostasSimCnh.some(p => tCnh === p || tCnh.includes(p));
+
+      if (disseSimCnh || disseNaoCnh) {
+        estado.temCnh = disseSimCnh ? "Sim" : "Não";
         estado.etapa = "entrada";
         await salvarColetaCreditoPendente(from, estado);
 
@@ -2186,7 +2158,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
         await salvarMensagem(from, "sara", msg);
         return;
       } else {
-        const msg = "Não consegui entender a data. Pode mandar no formato dia/mês/ano? Ex: 15/03/1990 😊";
+        const msg = "Só preciso confirmar: você tem CNH (carteira de motorista)? Pode responder sim ou não 😊";
         conversas[from].push({ role: "assistant", content: msg });
         await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
           { messaging_product: "whatsapp", to: from, text: { body: msg } },
@@ -2230,7 +2202,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
       const dadosFinais = {
         nome: estado.nome, cpf: estado.cpf, nascimento: estado.nascimento,
-        entrada: estado.entrada, veiculo: nomeVeiculo
+        entrada: estado.entrada, veiculo: nomeVeiculo, temCnh: estado.temCnh || "Não informado"
       };
       delete coletaCredito[from];
       limparColetaCreditoPendente(from).catch(() => {});
@@ -2287,14 +2259,14 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   }
 
   if (!coletaCredito[from] && !clientePedindoFotos && detectarInteresseFinanciamento(text, conversas[from])) {
-        const veiculoParaFinanciar = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
-        coletaCredito[from] = veiculoParaFinanciar
-                ? { etapa: "nome", veiculo: `${limparTexto(veiculoParaFinanciar.modelo)} ${veiculoParaFinanciar.ano || ""}`.trim() }
-                : { etapa: "aguardando_veiculo" };
-        await salvarColetaCreditoPendente(from, coletaCredito[from]);
-        const msg = veiculoParaFinanciar
-                ? "Posso fazer uma simulação de crédito pra você! 😊 Pra isso preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?"
-                : "Posso fazer uma simulação de crédito sim! 😊 Só me confirma antes: qual carro do nosso estoque você quer financiar?";
+    const veiculoParaFinanciar = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
+    coletaCredito[from] = veiculoParaFinanciar
+      ? { etapa: "nome", veiculo: `${limparTexto(veiculoParaFinanciar.modelo)} ${veiculoParaFinanciar.ano || ""}`.trim() }
+      : { etapa: "aguardando_veiculo" };
+    await salvarColetaCreditoPendente(from, coletaCredito[from]);
+    const msg = veiculoParaFinanciar
+      ? "Posso fazer uma simulação de crédito pra você! 😊 Pra isso preciso de alguns dados rapidinho. Primeiro, qual seu nome completo?"
+      : "Posso fazer uma simulação de crédito sim! 😊 Só me confirma antes: qual carro do nosso estoque você quer financiar?";
     conversas[from].push({ role: "assistant", content: msg });
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
       { messaging_product: "whatsapp", to: from, text: { body: msg } },
@@ -2316,7 +2288,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   const isSimples = ehMensagemSimples(text);
   const todosTextos = conversas[from].filter(m => m.role === "user").map(m => m.content);
   const { marcaTroca, modeloTroca, anoTroca, modeloBuscado, anoBuscado } = await extrairContextoConversa(todosTextos, isSimples, from);
-const veiculoAtual = await obterVeiculoAtualConversa(from, text, conversas[from]);
+  const veiculoAtual = await obterVeiculoAtualConversa(from, text, conversas[from]);
 
   let carroNaoDisponivel = null;
   if (modeloBuscado) {
@@ -2442,10 +2414,6 @@ function agendarFechamentoGrupoFotos(from, caption) {
     const g = filaFotos[from];
     if (!g) return;
     if (g.pendentes > 0) {
-      // ainda existe alguma foto do grupo sendo analisada (download + Claude vision) --
-      // fechar agora perderia essa foto, que sairia sozinha depois em outro grupo (era
-      // exatamente isso que causava o "9 fotos" quando o cliente mandava 10). Reagenda
-      // em vez de fechar.
       agendarFechamentoGrupoFotos(from, caption);
       return;
     }
@@ -2481,12 +2449,12 @@ app.get("/diagnostico", async (req, res) => {
 <p id="r">Testando fetch...</p>
 <script>
 fetch('https://agente-mensagens1.onrender.com/crm')
-  .then(r => { document.getElementById('r').textContent = 'Fetch /crm: ✅ HTTP ' + r.status; return r.json(); })
-  .then(d => {
-    const total = Object.values(d).reduce((a,b) => a + b.length, 0);
-    document.getElementById('r').textContent += ' — ' + total + ' leads carregados ✅';
-  })
-  .catch(e => { document.getElementById('r').textContent = 'Fetch ERRO: ' + e.message; });
+.then(r => { document.getElementById('r').textContent = 'Fetch /crm: ✅ HTTP ' + r.status; return r.json(); })
+.then(d => {
+const total = Object.values(d).reduce((a,b) => a + b.length, 0);
+document.getElementById('r').textContent += ' — ' + total + ' leads carregados ✅';
+})
+.catch(e => { document.getElementById('r').textContent = 'Fetch ERRO: ' + e.message; });
 </script>
 </body></html>`);
   } catch(e) { res.send('Erro Supabase: ' + e.message); }
@@ -2517,36 +2485,34 @@ app.get("/followups", async (req, res) => {
       const venceu = agendado && agendado <= agora;
       const cor = motivoCor[f.motivo] || "#888";
       const labelBase = motivoLabel[f.motivo] || f.motivo;
-      // Régua de reativação pode repetir (D+2/D+4/D+7) para o mesmo
-      // cliente — mostra em qual nível esse registro está.
       const label = (f.motivo === "sumiu" && f.nivel) ? `${labelBase} (nível ${f.nivel})` : labelBase;
       const statusBadge = f.enviado
         ? '<span style="background:#1e3a1e;color:#81c784;padding:2px 8px;border-radius:10px;font-size:10px">✅ Enviado</span>'
         : venceu
-          ? '<span style="background:#3a1a1a;color:#ef5350;padding:2px 8px;border-radius:10px;font-size:10px">⚠️ Vencido</span>'
-          : '<span style="background:#1a1a2e;color:#64b5f6;padding:2px 8px;border-radius:10px;font-size:10px">⏳ Pendente</span>';
+        ? '<span style="background:#3a1a1a;color:#ef5350;padding:2px 8px;border-radius:10px;font-size:10px">⚠️ Vencido</span>'
+        : '<span style="background:#1a1a2e;color:#64b5f6;padding:2px 8px;border-radius:10px;font-size:10px">⏳ Pendente</span>';
 
       return `<div style="background:#161616;border:1px solid #222;border-left:3px solid ${cor};border-radius:8px;padding:12px;margin-bottom:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <div>
-            <a href="/painel/chat/${f.telefone}" style="color:#fff;font-weight:600;font-size:13px;text-decoration:none">${formatado}</a>
-            ${f.veiculo_interesse ? `<span style="color:#f0a500;font-size:11px;margin-left:8px">🚗 ${f.veiculo_interesse}</span>` : ""}
-          </div>
-          ${statusBadge}
-        </div>
-        <div style="font-size:11px;color:${cor};margin-bottom:4px">${label}</div>
-        <div style="font-size:10px;color:#555">
-          Agendado: ${agendado ? agendado.toLocaleString("pt-BR") : "—"} | 
-          Criado: ${new Date(f.criado_em).toLocaleString("pt-BR")}
-        </div>
-        ${!f.enviado ? `
-        <form action="/followups/disparar" method="POST" style="margin-top:8px;display:flex;gap:6px">
-          <input type="hidden" name="id" value="${f.id}">
-          <input type="hidden" name="telefone" value="${f.telefone}">
-          <input type="hidden" name="veiculo" value="${f.veiculo_interesse || ""}">
-          <button type="submit" style="background:#f0a500;color:#000;border:none;border-radius:5px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer">📤 Disparar agora</button>
-        </form>` : ""}
-      </div>`;
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+<div>
+<a href="/painel/chat/${f.telefone}" style="color:#fff;font-weight:600;font-size:13px;text-decoration:none">${formatado}</a>
+${f.veiculo_interesse ? `<span style="color:#f0a500;font-size:11px;margin-left:8px">🚗 ${f.veiculo_interesse}</span>` : ""}
+</div>
+${statusBadge}
+</div>
+<div style="font-size:11px;color:${cor};margin-bottom:4px">${label}</div>
+<div style="font-size:10px;color:#555">
+Agendado: ${agendado ? agendado.toLocaleString("pt-BR") : "—"} |
+Criado: ${new Date(f.criado_em).toLocaleString("pt-BR")}
+</div>
+${!f.enviado ? `
+<form action="/followups/disparar" method="POST" style="margin-top:8px;display:flex;gap:6px">
+<input type="hidden" name="id" value="${f.id}">
+<input type="hidden" name="telefone" value="${f.telefone}">
+<input type="hidden" name="veiculo" value="${f.veiculo_interesse || ""}">
+<button type="submit" style="background:#f0a500;color:#000;border:none;border-radius:5px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer">📤 Disparar agora</button>
+</form>` : ""}
+</div>`;
     }).join("");
 
     const veiculosOpts = estoqueAtual.map(v => `<option value="${limparTexto(v.modelo || "")} ${v.ano || ""}">${limparTexto(v.modelo || "")} ${v.ano || ""}</option>`).join("");
@@ -2557,32 +2523,32 @@ app.get("/followups", async (req, res) => {
 header{background:#111;border-bottom:1px solid #222;padding:12px 16px;position:sticky;top:0;display:flex;align-items:center;gap:10px;z-index:10}
 </style></head><body>
 <header>
-  <a href="/painel" style="color:#f0a500;text-decoration:none;font-size:20px">←</a>
-  <h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">📅 Follow-ups</h1>
-  <button onclick="document.getElementById('form-novo').style.display=document.getElementById('form-novo').style.display==='none'?'block':'none'" style="margin-left:auto;background:#f0a500;color:#000;border:none;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer">+ Novo</button>
+<a href="/painel" style="color:#f0a500;text-decoration:none;font-size:20px">←</a>
+<h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">📅 Follow-ups</h1>
+<button onclick="document.getElementById('form-novo').style.display=document.getElementById('form-novo').style.display==='none'?'block':'none'" style="margin-left:auto;background:#f0a500;color:#000;border:none;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer">+ Novo</button>
 </header>
 
 <div id="form-novo" style="display:none;padding:12px 16px;background:#1a1500;border-bottom:1px solid #f0a500">
-  <form action="/followups/criar" method="POST" style="display:flex;flex-direction:column;gap:8px">
-    <input type="text" name="telefone" placeholder="Telefone (ex: 5551999999999)" required style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
-    <select name="motivo" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
-      <option value="sumiu">😶 Sumiu</option>
-      <option value="achou_caro">💰 Achou caro</option>
-      <option value="vai_pensar">🤔 Vai pensar</option>
-      <option value="sem_interesse">❌ Sem interesse</option>
-    </select>
-    <select name="veiculo" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
-      <option value="">-- Veículo (opcional) --</option>
-      ${veiculosOpts}
-    </select>
-    <input type="number" name="dias" value="3" min="1" max="30" placeholder="Dias para disparar" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
-    <button type="submit" style="background:#f0a500;color:#000;border:none;border-radius:6px;padding:8px;font-size:13px;font-weight:700;cursor:pointer">Agendar follow-up</button>
-  </form>
+<form action="/followups/criar" method="POST" style="display:flex;flex-direction:column;gap:8px">
+<input type="text" name="telefone" placeholder="Telefone (ex: 5551999999999)" required style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
+<select name="motivo" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
+<option value="sumiu">😶 Sumiu</option>
+<option value="achou_caro">💰 Achou caro</option>
+<option value="vai_pensar">🤔 Vai pensar</option>
+<option value="sem_interesse">❌ Sem interesse</option>
+</select>
+<select name="veiculo" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
+<option value="">-- Veículo (opcional) --</option>
+${veiculosOpts}
+</select>
+<input type="number" name="dias" value="3" min="1" max="30" placeholder="Dias para disparar" style="background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;padding:8px;font-size:13px">
+<button type="submit" style="background:#f0a500;color:#000;border:none;border-radius:6px;padding:8px;font-size:13px;font-weight:700;cursor:pointer">Agendar follow-up</button>
+</form>
 </div>
 
 <div style="padding:14px">
-  <div style="font-size:11px;color:#555;margin-bottom:10px">${lista.length} follow-up(s) | ${lista.filter(f=>f.enviado).length} enviados | ${lista.filter(f=>!f.enviado).length} pendentes</div>
-  ${itensHtml || '<p style="color:#555;text-align:center;padding:20px">Nenhum follow-up cadastrado ainda</p>'}
+<div style="font-size:11px;color:#555;margin-bottom:10px">${lista.length} follow-up(s) | ${lista.filter(f=>f.enviado).length} enviados | ${lista.filter(f=>!f.enviado).length} pendentes</div>
+${itensHtml || '<p style="color:#555;text-align:center;padding:20px">Nenhum follow-up cadastrado ainda</p>'}
 </div>
 </body></html>`;
 
@@ -2615,7 +2581,6 @@ app.post("/followups/criar", async (req, res) => {
   } catch(e) { console.error("[FollowUp] Erro criação manual:", e.message); }
   res.redirect("/followups");
 });
-
 
 app.get("/testar-notificacao", async (req, res) => {
   try {
@@ -2755,17 +2720,17 @@ app.post("/webhook", async (req, res) => {
         if (!text) return;
         console.log(`Texto de ${from}: ${text}`);
         if (textoReferral) {
-if (!conversas[from]) {
-const msgsExistentesReferral = await buscarMensagens(from);
-conversas[from] = msgsExistentesReferral.length > 0
-? msgsExistentesReferral.slice(-20).map(m => ({ role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant", content: m.texto || "" }))
-: [];
-}
-if (conversas[from].length === 0) {
-conversas[from].push({ role: "user", content: textoReferral });
-await salvarMensagem(from, "sistema", textoReferral);
-}
-}
+          if (!conversas[from]) {
+            const msgsExistentesReferral = await buscarMensagens(from);
+            conversas[from] = msgsExistentesReferral.length > 0
+              ? msgsExistentesReferral.slice(-20).map(m => ({ role: (m.tipo === "client" || m.tipo === "sistema") ? "user" : "assistant", content: m.texto || "" }))
+              : [];
+          }
+          if (conversas[from].length === 0) {
+            conversas[from].push({ role: "user", content: textoReferral });
+            await salvarMensagem(from, "sistema", textoReferral);
+          }
+        }
         await processarMensagemNaFila(from, text);
       } else if (msg.type === "audio") {
         const texto = await transcreverAudio(msg.audio.id);
@@ -2788,10 +2753,6 @@ await salvarMensagem(from, "sistema", textoReferral);
           await salvarMensagem(from, "client_foto", JSON.stringify({ mediaId, url: null, caption, mimeType }));
         }
         const analise = await analisarImagem(mediaId, caption, from);
-        // Cada foto chega em um webhook separado e e analisada de forma assincrona. Se o
-        // cliente manda varias fotos rapido, os tempos de analise variam -- por isso usamos
-        // um contador de analises pendentes em vez de so um timer: o grupo so fecha quando
-        // o timer expira E nao ha nenhuma analise em andamento (ver agendarFechamentoGrupoFotos).
         if (!filaFotos[from]) filaFotos[from] = { analises: [], pendentes: 0, timer: null };
         if (analise) filaFotos[from].analises.push(analise);
         filaFotos[from].pendentes = Math.max(0, (filaFotos[from].pendentes || 1) - 1);
@@ -2841,23 +2802,23 @@ app.get("/painel", async (req, res) => {
       let cardsHtml = cards.length === 0
         ? '<p style="color:#444;font-size:11px;text-align:center;padding:10px">Vazio</p>'
         : cards.map(c => {
-            const tel = String(c.telefone || '');
-            const msg = String(c.ultimaMensagem || '').substring(0, 60);
-            const vei = String(c.veiculo || '');
-            const opcoesEstagio = estagios.map(e2 =>
-              '<option value="' + e2.id + '"' + (e2.id === est.id ? ' selected' : '') + '>' + e2.label + '</option>'
-            ).join('');
-            const textoBusca = (tel + ' ' + vei + ' ' + msg).toLowerCase().replace(/"/g, '');
-            return '<div class="lead-card" data-busca="' + textoBusca + '" style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
-              '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
-              (vei ? '<div style="font-size:11px;color:#f0a500;margin-top:3px">🚗 ' + vei + '</div>' : '') +
-              '<div style="font-size:11px;color:#555;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
-              '<div style="font-size:10px;color:#444;margin-top:3px">' + (c.tempoLabel || '') + '</div>' +
-              '<div style="margin-top:8px;display:flex;gap:6px;align-items:center">' +
-              '<a href="/painel/chat/' + tel + '" style="background:#1e2a1e;color:#81c784;padding:4px 10px;border-radius:5px;font-size:11px;text-decoration:none">💬 Chat</a>' +
-              '<select onchange="moverLead(\'' + tel + '\', this.value)" style="background:#1a1a1a;color:#ccc;border:1px solid #2a2a2a;border-radius:5px;font-size:11px;padding:3px 4px;flex:1">' + opcoesEstagio + '</select>' +
-              '</div></div>';
-          }).join('');
+          const tel = String(c.telefone || '');
+          const msg = String(c.ultimaMensagem || '').substring(0, 60);
+          const vei = String(c.veiculo || '');
+          const opcoesEstagio = estagios.map(e2 =>
+            '<option value="' + e2.id + '"' + (e2.id === est.id ? ' selected' : '') + '>' + e2.label + '</option>'
+          ).join('');
+          const textoBusca = (tel + ' ' + vei + ' ' + msg).toLowerCase().replace(/"/g, '');
+          return '<div class="lead-card" data-busca="' + textoBusca + '" style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
+            '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
+            (vei ? '<div style="font-size:11px;color:#f0a500;margin-top:3px">🚗 ' + vei + '</div>' : '') +
+            '<div style="font-size:11px;color:#555;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
+            '<div style="font-size:10px;color:#444;margin-top:3px">' + (c.tempoLabel || '') + '</div>' +
+            '<div style="margin-top:8px;display:flex;gap:6px;align-items:center">' +
+            '<a href="/painel/chat/' + tel + '" style="background:#1e2a1e;color:#81c784;padding:4px 10px;border-radius:5px;font-size:11px;text-decoration:none">💬 Chat</a>' +
+            '<select onchange="moverLead(\'' + tel + '\', this.value)" style="background:#1a1a1a;color:#ccc;border:1px solid #2a2a2a;border-radius:5px;font-size:11px;padding:3px 4px;flex:1">' + opcoesEstagio + '</select>' +
+            '</div></div>';
+        }).join('');
 
       colunasHtml += '<div class="lead-coluna" style="min-width:220px;max-width:220px;background:#111;border-radius:10px;border-top:2px solid ' + est.cor + ';flex-shrink:0">' +
         '<div style="padding:10px 12px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center">' +
@@ -2908,33 +2869,33 @@ app.get("/painel", async (req, res) => {
       '<div class="board">' + colunasHtml + '</div>' +
       '<script>' +
       'function iniciarContato() {' +
-      '  const tel = document.getElementById("novo-tel").value.replace(/\\D/g,"");' +
-      '  const veiculo = document.getElementById("novo-template").value;' +
-      '  if (!tel || tel.length < 10) { alert("Digite um telefone válido"); return; }' +
-      '  fetch("/painel/iniciar-contato", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telefone: tel, veiculo }) })' +
-      '    .then(r => r.json())' +
-      '    .then(d => { if (d.ok) { alert("Template enviado com sucesso!"); document.getElementById("novo-tel").value = ""; } else alert("Erro: " + (d.erro||"falha no envio")); })' +
-      '    .catch(() => alert("Erro de conexão"));' +
+      ' const tel = document.getElementById("novo-tel").value.replace(/\\D/g,"");' +
+      ' const veiculo = document.getElementById("novo-template").value;' +
+      ' if (!tel || tel.length < 10) { alert("Digite um telefone válido"); return; }' +
+      ' fetch("/painel/iniciar-contato", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telefone: tel, veiculo }) })' +
+      ' .then(r => r.json())' +
+      ' .then(d => { if (d.ok) { alert("Template enviado com sucesso!"); document.getElementById("novo-tel").value = ""; } else alert("Erro: " + (d.erro||"falha no envio")); })' +
+      ' .catch(() => alert("Erro de conexão"));' +
       '}' +
       'function moverLead(tel, novoEstagio) {' +
-      '  fetch("/crm/mover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telefone: tel, estagio: novoEstagio }) })' +
-      '    .then(r => r.json())' +
-      '    .then(d => { if (d.ok) location.reload(); else alert("Erro ao mover lead"); })' +
-      '    .catch(() => alert("Erro de conexão ao mover lead"));' +
+      ' fetch("/crm/mover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telefone: tel, estagio: novoEstagio }) })' +
+      ' .then(r => r.json())' +
+      ' .then(d => { if (d.ok) location.reload(); else alert("Erro ao mover lead"); })' +
+      ' .catch(() => alert("Erro de conexão ao mover lead"));' +
       '}' +
       'function filtrarLeads(termo) {' +
-      '  var t = termo.toLowerCase().trim();' +
-      '  var cards = document.querySelectorAll(".lead-card");' +
-      '  cards.forEach(function(card) {' +
-      '    var bate = !t || (card.getAttribute("data-busca") || "").indexOf(t) !== -1;' +
-      '    card.style.display = bate ? "" : "none";' +
-      '  });' +
-      '  var colunas = document.querySelectorAll(".lead-coluna");' +
-      '  colunas.forEach(function(col) {' +
-      '    var visiveis = col.querySelectorAll(".lead-card:not([style*=\\"display: none\\"])").length;' +
-      '    var contagem = col.querySelector(".lead-contagem");' +
-      '    if (contagem) contagem.textContent = t ? visiveis : col.querySelectorAll(".lead-card").length;' +
-      '  });' +
+      ' var t = termo.toLowerCase().trim();' +
+      ' var cards = document.querySelectorAll(".lead-card");' +
+      ' cards.forEach(function(card) {' +
+      ' var bate = !t || (card.getAttribute("data-busca") || "").indexOf(t) !== -1;' +
+      ' card.style.display = bate ? "" : "none";' +
+      ' });' +
+      ' var colunas = document.querySelectorAll(".lead-coluna");' +
+      ' colunas.forEach(function(col) {' +
+      ' var visiveis = col.querySelectorAll(".lead-card:not([style*=\\"display: none\\"])").length;' +
+      ' var contagem = col.querySelector(".lead-contagem");' +
+      ' if (contagem) contagem.textContent = t ? visiveis : col.querySelectorAll(".lead-card").length;' +
+      ' });' +
       '}' +
       '</script>' +
       '</body></html>';
@@ -2945,7 +2906,6 @@ app.get("/painel", async (req, res) => {
     res.send('<html><body style="background:#000;color:#f44;padding:20px;font-family:monospace">Erro: ' + e.message + '</body></html>');
   }
 });
-
 
 app.get("/painel/alertas", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -2972,8 +2932,8 @@ app.get("/painel/alertas", async (req, res) => {
       '</div>' +
       '<script>' +
       'function marcarVisto(id, btn) {' +
-      '  fetch("/painel/alertas/visto", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) })' +
-      '    .then(r => r.json()).then(d => { if (d.ok) location.reload(); });' +
+      ' fetch("/painel/alertas/visto", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) })' +
+      ' .then(r => r.json()).then(d => { if (d.ok) location.reload(); });' +
       '}' +
       '</script>' +
       '</body></html>';
@@ -2985,23 +2945,23 @@ app.get("/painel/alertas", async (req, res) => {
   }
 });
 app.post("/registrar-mensagem", async (req, res) => {
-try {
-const { telefone, tipo, texto, wamid, status_entrega, motivo_erro } = req.body || {};
-if (!telefone || !texto) {
-return res.status(400).json({ ok: false, erro: "telefone e texto sao obrigatorios" });
-}
-const numero = String(telefone).replace(/\D/g, "");
-const { error } = await supabase.from("mensagens").insert({ telefone: numero, tipo: tipo || "sara", texto, wamid: wamid || null, status_entrega: status_entrega || "enviado", motivo_erro: motivo_erro || null });
-if (error) {
-console.error("[Mensagem] ERRO ao gravar mensagem:", error.message);
-return res.status(500).json({ ok: false, erro: error.message });
-}
-console.log(`[Mensagem] OK gravada: ${numero} (${tipo || "sara"})`);
-res.json({ ok: true });
-} catch (e) {
-console.error("[Mensagem] EXCECAO:", e.message);
-res.status(500).json({ ok: false, erro: e.message });
-}
+  try {
+    const { telefone, tipo, texto, wamid, status_entrega, motivo_erro } = req.body || {};
+    if (!telefone || !texto) {
+      return res.status(400).json({ ok: false, erro: "telefone e texto sao obrigatorios" });
+    }
+    const numero = String(telefone).replace(/\D/g, "");
+    const { error } = await supabase.from("mensagens").insert({ telefone: numero, tipo: tipo || "sara", texto, wamid: wamid || null, status_entrega: status_entrega || "enviado", motivo_erro: motivo_erro || null });
+    if (error) {
+      console.error("[Mensagem] ERRO ao gravar mensagem:", error.message);
+      return res.status(500).json({ ok: false, erro: error.message });
+    }
+    console.log(`[Mensagem] OK gravada: ${numero} (${tipo || "sara"})`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[Mensagem] EXCECAO:", e.message);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
 });
 app.post("/notificar-lead", async (req, res) => {
   try {
@@ -3121,7 +3081,6 @@ app.post("/painel/alertas/visto", async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ erro: e.message }); }
 });
-
 app.get("/painel/lista", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   try {
@@ -3445,7 +3404,6 @@ app.post("/painel/template", async (req, res) => {
     return res.redirect("/painel/chat/" + tel + "?erro=1");
   }
 });
-
 
 app.get("/painel/mensagens/:from", async (req, res) => {
   try { res.json({ mensagens: await buscarMensagens(req.params.from) }); } catch (e) { res.json({ mensagens: [] }); }
