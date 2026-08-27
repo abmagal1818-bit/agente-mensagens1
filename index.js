@@ -902,7 +902,7 @@ async function detectarLeadFrio(from, text, historicoConversa) {
     const frasesSemInteresse = ["não tenho interesse", "desisti", "não quero mais", "mudei de ideia", "cancelar", "esquece", "deixa pra lá"];
     if (!motivo && frasesSemInteresse.some(f => t.includes(f))) { motivo = "sem_interesse"; dias = 7; }
     if (!motivo) return;
-    const vm = historico.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|cerato|cobalt|palio|asx|yaris|mobi|virtus|captur|tcross|t-cross|strada|s10|duster|kicks|spin|ecosport|fox|up|saveiro|montana|tiguan|bmw|mercedes|audi|honda|toyota|hyundai|kia|nissan|fiat|chevrolet|volkswagen|ford|renault|peugeot|citroen|mitsubishi|land rover|jeep|byd|dolphin|dolphin mini|haval|caoa chery|chery|jac|great wall|volvo|porsche|lexus|jaguar|ram|dodge/i);
+    const vm = historico.match(/\b(?:evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|cerato|cobalt|palio|asx|yaris|mobi|virtus|captur|tcross|t-cross|strada|s10|duster|kicks|spin|ecosport|fox|up|saveiro|montana|tiguan|bmw|mercedes|audi|honda|toyota|hyundai|kia|nissan|fiat|chevrolet|volkswagen|ford|renault|peugeot|citroen|mitsubishi|land rover|jeep|byd|dolphin mini|dolphin|haval|caoa chery|chery|jac|great wall|volvo|porsche|lexus|jaguar|ram|dodge)\b/i);
     await agendarFollowUp(from, motivo, vm ? vm[0] : null, dias);
   } catch (e) { console.error("[FollowUp] Erro:", e.message); }
 }
@@ -915,7 +915,7 @@ async function verificarClientesSumidos() {
         const { data } = await supabase.from("followups").select("id").eq("telefone", telefone).eq("enviado", false).limit(1);
         if (!data?.length) {
           const hist = (conversas[telefone] || []).map(m => m.content || "").join(" ").toLowerCase();
-          const vm = hist.match(/evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|cerato|cobalt|palio|asx|yaris|mobi|virtus|captur|tcross|t-cross|strada|s10|duster|kicks|spin|ecosport|fox|up|saveiro|montana|tiguan|bmw|mercedes|audi|honda|toyota|hyundai|kia|nissan|fiat|chevrolet|volkswagen|ford|renault|peugeot|citroen|mitsubishi|land rover|jeep|byd|dolphin|dolphin mini|haval|caoa chery|chery|jac|great wall|volvo|porsche|lexus|jaguar|ram|dodge/i);
+          const vm = hist.match(/\b(?:evoque|jetta|compass|corolla|civic|tracker|creta|tucson|renegade|hilux|ranger|voyage|gol|onix|polo|hb20|argo|sandero|kwid|cerato|cobalt|palio|asx|yaris|mobi|virtus|captur|tcross|t-cross|strada|s10|duster|kicks|spin|ecosport|fox|up|saveiro|montana|tiguan|bmw|mercedes|audi|honda|toyota|hyundai|kia|nissan|fiat|chevrolet|volkswagen|ford|renault|peugeot|citroen|mitsubishi|land rover|jeep|byd|dolphin mini|dolphin|haval|caoa chery|chery|jac|great wall|volvo|porsche|lexus|jaguar|ram|dodge)\b/i);
           let veiculoInteresse = vm ? vm[0] : null;
           if (!veiculoInteresse) {
             const { data: cli } = await supabase.from("clientes").select("veiculo_interesse").eq("telefone", telefone).limit(1);
@@ -1034,6 +1034,14 @@ async function processarFollowUpsPendentes() {
           continue;
         }
       }
+
+      if (followup.veiculo_interesse && !veiculoAindaEstaDisponivel(followup.veiculo_interesse)) {
+        await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
+        console.log(`[FollowUp] Cancelado (veiculo vendido/saiu do estoque): ${followup.telefone} — ${followup.veiculo_interesse}`);
+        notificarFollowUpVeiculoVendido(followup.telefone, followup.veiculo_interesse).catch(() => {});
+        continue;
+      }
+
       const mensagem = await gerarMensagemFollowUp(followup);
       if (!mensagem) continue;
       try {
@@ -1130,6 +1138,32 @@ async function notificarCarroNaoDisponivel(from, modeloBuscado, infoCliente) {
     await enviarTexto(NUMERO_AUGUSTO, mensagem);
     console.log(`[Notificação] ✅ Carro não disponível notificado: ${modeloBuscado} de ${formatado}`);
   } catch (e) { console.error(`[Notificação] Erro carro:`, e.message); }
+}
+
+function veiculoAindaEstaDisponivel(nomeVeiculo) {
+  if (!nomeVeiculo) return true; // sem veiculo associado, nao ha o que checar
+  const normalizarPalavras = (str) => limparTexto(str || "").toLowerCase().split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
+  const nomeLower = limparTexto(nomeVeiculo).toLowerCase();
+  const palavrasBuscadas = normalizarPalavras(nomeVeiculo);
+  if (!palavrasBuscadas.length) return true; // nome generico demais pra checar com seguranca
+  return estoqueAtual.some(v => {
+    const modeloEstoque = limparTexto(v.modelo || "").toLowerCase();
+    const palavrasEstoque = normalizarPalavras(v.modelo);
+    return modeloEstoque.includes(nomeLower) ||
+      nomeLower.includes(modeloEstoque) ||
+      palavrasBuscadas.some(p => palavrasEstoque.includes(p));
+  });
+}
+
+async function notificarFollowUpVeiculoVendido(telefone, veiculo) {
+  const numero = telefone.replace(/\D/g, "");
+  const formatado = numero.length >= 12 ? `+${numero.slice(0,2)} (${numero.slice(2,4)}) ${numero.slice(4,9)}-${numero.slice(9)}` : telefone;
+  const linkWhatsApp = `https://wa.me/${numero}`;
+  const mensagem = `⏸️ *Follow-up cancelado — veículo vendido*\nCliente: ${formatado}\nEstava de olho em: *${veiculo}*\n\nEsse veículo já saiu do estoque, então o follow-up automático foi cancelado pra não incomodar o cliente com um carro que já era. Se fizer sentido, oferece uma alternativa parecida.\n\nFalar com cliente: ${linkWhatsApp}`;
+  try {
+    await enviarTexto(NUMERO_AUGUSTO, mensagem);
+    console.log(`[FollowUp] ✅ Notificado cancelamento (veiculo vendido): ${veiculo} de ${formatado}`);
+  } catch (e) { console.error(`[FollowUp] Erro ao notificar cancelamento:`, e.message); }
 }
 
 async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, caption = "") {
