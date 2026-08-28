@@ -999,15 +999,35 @@ async function gerarMensagemFollowUp(followup) {
       sumiu: promptsSumiu[nivel] || promptsSumiu[1],
       visita_nao_confirmada: `Você é Sarah, vendedora da Premium Automarcas. O cliente tinha agendado uma visita pra loja sobre o ${veiculo} mas não temos confirmação de que ele veio. Mensagem tipo "Verifiquei que não conseguiu comparecer no horário agendado. Gostaria de reagendar?" — natural, sem cobrar, sugerindo reagendar pra mais tarde ou outro dia. Máximo 3 linhas.`
     };
+    const instrucaoFormato = "\n\nIMPORTANTE: responda APENAS com o texto puro da mensagem que sera enviada direto pro cliente no WhatsApp. NAO inclua titulo, cabecalho (nada de \"# Mensagem...\"), marcacao markdown, comentarios explicando a abordagem, nem mais de uma opcao/alternativa de mensagem. So a mensagem final, pronta pra mandar, nada antes nem depois dela.";
     const res = await axios.post("https://api.anthropic.com/v1/messages",
-      { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: (prompts[followup.motivo] || prompts.vai_pensar) + (followup.veiculo_interesse ? "" : "\n\nIMPORTANTE: nao sabemos qual veiculo especifico e o de interesse do cliente. NAO cite nem invente nenhuma marca ou modelo de carro por nome - fale de forma generica (\"nossos veiculos\", \"o carro que voce viu\").") }] },
+      { model: "claude-haiku-4-5", max_tokens: 150, messages: [{ role: "user", content: (prompts[followup.motivo] || prompts.vai_pensar) + (followup.veiculo_interesse ? "" : "\n\nIMPORTANTE: nao sabemos qual veiculo especifico e o de interesse do cliente. NAO cite nem invente nenhuma marca ou modelo de carro por nome - fale de forma generica (\"nossos veiculos\", \"o carro que voce viu\").") + instrucaoFormato }] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
-    return res.data.content[0].text;
+    return limparMensagemFollowUp(res.data.content[0].text);
   } catch (e) {
     if (e.response) await notificarFalhaApiClaude(e, `Geração de mensagem de follow-up (${followup.telefone})`);
     return null;
   }
+}
+
+function limparMensagemFollowUp(texto) {
+  if (!texto) return texto;
+  let t = String(texto).trim();
+  // remove cabecalho markdown tipo "# Mensagem..." ou "# Mensagem de Sarah - Premium Automarcas" na primeira linha
+  t = t.replace(/^#{1,3}\s*mensagem[^\n]*\n+/i, "").trim();
+  // se o modelo mandou mais de uma opcao separada por "---", fica só com a primeira
+  const partesSeparador = t.split(/\n\s*-{3,}\s*\n/);
+  if (partesSeparador.length > 1) t = partesSeparador[0].trim();
+  // remove marcador de alternativa tipo "*Ou uma alternativa mais leve:*" seguido de texto, se sobrou algo assim sozinho
+  t = t.replace(/\*[^*\n]*alternativa[^*\n]*\*\s*$/i, "").trim();
+  // remove aspas envolvendo a mensagem inteira
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith('\u201c') && t.endsWith('\u201d'))) {
+    t = t.slice(1, -1).trim();
+  }
+  // remove comentario meta solto no final tipo "*Curta, leve, sem pressão...*"
+  t = t.replace(/\n+\*[^*\n]+\*\s*$/, "").trim();
+  return t;
 }
 
 async function processarFollowUpsPendentes() {
