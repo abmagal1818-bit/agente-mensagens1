@@ -789,10 +789,41 @@ async function atualizarEstagio(telefone, estagio, veiculo = null) {
   } catch (e) { console.error("[CRM] Erro:", e.message); }
 }
 
+function temNegacaoAntes(texto, termo) {
+  const idx = texto.indexOf(termo);
+  if (idx === -1) return false;
+  const antes = texto.slice(Math.max(0, idx - 20), idx);
+  return /\b(não|nao|nunca|jamais|nem)\b/.test(antes);
+}
+
+async function notificarMudancaEstagioAutomatica(from, estagio, gatilho) {
+  // Marcação automática por palavra-chave é sempre um palpite, não uma certeza —
+  // registra um alerta pro consultor confirmar/corrigir em vez de confiar 100% no keyword match.
+  try {
+    await supabase.from("alertas_pendentes").insert({
+      texto: `🏷️ Lead ${from} movido automaticamente para "${estagio}" (gatilho detectado: "${gatilho}"). Confira no painel se está certo.`
+    });
+  } catch (e) { console.error("[CRM] Erro ao registrar alerta de mudança automática:", e.message); }
+}
+
 async function detectarEstagio(from, text, historico) {
   const t = text.toLowerCase();
   const hist = (historico || []).map(m => m.content || "").join(" ").toLowerCase();
-  if (t.includes("fechei") || t.includes("comprei") || t.includes("vou comprar")) { await atualizarEstagio(from, "fechado"); return; }
+
+  const fraseComprouEmOutroLugar = ["comprei em outro lugar", "comprei outro carro", "fechei com outra loja", "já comprei", "acabei comprando outro"];
+  const fraseComprouAqui = ["fechei", "comprei", "vou comprar", "vou fechar", "topo fechar", "bater o martelo", "pode fazer o contrato"];
+
+  if (fraseComprouEmOutroLugar.some(f => t.includes(f))) {
+    await atualizarEstagio(from, "perdido");
+    await notificarMudancaEstagioAutomatica(from, "perdido", fraseComprouEmOutroLugar.find(f => t.includes(f)));
+    return;
+  }
+  const gatilhoFechou = fraseComprouAqui.find(f => t.includes(f) && !temNegacaoAntes(t, f));
+  if (gatilhoFechou) {
+    await atualizarEstagio(from, "vendido");
+    await notificarMudancaEstagioAutomatica(from, "vendido", gatilhoFechou);
+    return;
+  }
   if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir") || t.includes("vou visitar") || t.includes("amanhã às") || t.includes("amanha as") || t.includes("pode ser às") || t.includes("pode ser as")) {
     const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
     const jaEraVisita = clienteAtual?.[0]?.estagio === "visita_agendada";
@@ -828,7 +859,7 @@ async function buscarLeadsCRM() {
     if (!clientes) return {};
     const ultimaMsg = {};
     if (mensagens) mensagens.forEach(m => { if (!ultimaMsg[m.telefone]) ultimaMsg[m.telefone] = m; });
-    const kanban = { quente: [], negociacao: [], aguardando: [], visita_agendada: [], frio: [], fechado: [] };
+    const kanban = { quente: [], negociacao: [], aguardando: [], visita_agendada: [], frio: [], vendido: [], perdido: [] };
     clientes.forEach(c => {
       const estagio = c.estagio || "quente";
       const agora = Date.now();
@@ -933,7 +964,7 @@ async function verificarClientesSumidos() {
       .from("clientes")
       .select("telefone, ultima_mensagem_cliente, veiculo_interesse, estagio")
       .lt("ultima_mensagem_cliente", limite24h)
-      .not("estagio", "in", '("fechado","frio")')
+      .not("estagio", "in", '("vendido","perdido","frio")')
       .limit(20);
     if (clientesSumidosBanco?.length) {
       for (const cli of clientesSumidosBanco) {
@@ -1225,6 +1256,28 @@ async function notificarFotoComAnalise(from, imageBuffer, mimeType, analise, cap
       await registrarEnvioFotoConsultor(from, analise, caption, false, e2.message);
       return false;
     }
+  }
+}
+
+async function arquivarFotoCliente(urlTemporaria, mediaId, mimeType) {
+  // A URL que a Meta devolve pra mídia recebida é assinada e expira rápido (horas, não dias).
+  // Baixamos o arquivo agora e guardamos uma cópia permanente no Supabase Storage,
+  // no mesmo bucket já usado pras fotos/vídeos de veículo, pra nunca perder a foto do cliente.
+  try {
+    const imgRes = await axios.get(urlTemporaria, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }, responseType: "arraybuffer" });
+    const ext = (mimeType || "image/jpeg").split("/")[1]?.split("+")[0] || "jpg";
+    const nomeArquivo = `fotos-clientes/${mediaId}.${ext}`;
+    const { error } = await supabase.storage.from("veiculos").upload(nomeArquivo, imgRes.data, {
+      contentType: mimeType || "image/jpeg",
+      upsert: true
+    });
+    if (error) { console.error("[FotoCliente] Erro ao subir pro Storage:", error.message); return null; }
+    const { data: urlData } = supabase.storage.from("veiculos").getPublicUrl(nomeArquivo);
+    console.log(`[FotoCliente] ✅ Arquivada permanentemente: ${nomeArquivo}`);
+    return urlData?.publicUrl || null;
+  } catch (e) {
+    console.error("[FotoCliente] Erro ao arquivar foto do cliente:", e.message);
+    return null;
   }
 }
 
@@ -2836,7 +2889,8 @@ app.post("/webhook", async (req, res) => {
         try {
           const mediaRes = await axios.get(`https://graph.facebook.com/v25.0/${mediaId}`, { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } });
           const urlTemporaria = mediaRes.data?.url || null;
-          await salvarMensagem(from, "client_foto", JSON.stringify({ mediaId, url: urlTemporaria, caption, mimeType }));
+          const urlPermanente = urlTemporaria ? await arquivarFotoCliente(urlTemporaria, mediaId, mimeType) : null;
+          await salvarMensagem(from, "client_foto", JSON.stringify({ mediaId, url: urlPermanente || urlTemporaria, arquivada: !!urlPermanente, caption, mimeType }));
         } catch (e) {
           await salvarMensagem(from, "client_foto", JSON.stringify({ mediaId, url: null, caption, mimeType }));
         }
@@ -2879,7 +2933,8 @@ app.get("/painel", async (req, res) => {
       {id:'aguardando', label:'⏳ Aguardando', cor:'#64b5f6'},
       {id:'visita_agendada', label:'📅 Visita', cor:'#81c784'},
       {id:'frio', label:'❄️ Frio', cor:'#90a4ae'},
-      {id:'fechado', label:'✅ Fechado', cor:'#ce93d8'}
+      {id:'vendido', label:'✅ Vendido', cor:'#4caf50'},
+      {id:'perdido', label:'❌ Perdido', cor:'#78716c'}
     ];
     let totalLeads = 0;
     estagios.forEach(e => { if (kanban[e.id]) totalLeads += kanban[e.id].length; });
@@ -2897,23 +2952,23 @@ app.get("/painel", async (req, res) => {
             '<option value="' + e2.id + '"' + (e2.id === est.id ? ' selected' : '') + '>' + e2.label + '</option>'
           ).join('');
           const textoBusca = (tel + ' ' + vei + ' ' + msg).toLowerCase().replace(/"/g, '');
-          return '<div class="lead-card" data-busca="' + textoBusca + '" style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
+          return '<div class="lead-card" data-tel="' + tel + '" data-busca="' + textoBusca + '" style="background:#161616;border:1px solid #222;border-radius:8px;padding:10px;margin-bottom:8px">' +
             '<div style="font-size:13px;font-weight:600;color:#fff">' + (c.formatado || tel) + '</div>' +
             (vei ? '<div style="font-size:11px;color:#f0a500;margin-top:3px">🚗 ' + vei + '</div>' : '') +
             '<div style="font-size:11px;color:#555;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + msg + '</div>' +
             '<div style="font-size:10px;color:#444;margin-top:3px">' + (c.tempoLabel || '') + '</div>' +
             '<div style="margin-top:8px;display:flex;gap:6px;align-items:center">' +
             '<a href="/painel/chat/' + tel + '" style="background:#1e2a1e;color:#81c784;padding:4px 10px;border-radius:5px;font-size:11px;text-decoration:none">💬 Chat</a>' +
-            '<select onchange="moverLead(\'' + tel + '\', this.value)" style="background:#1a1a1a;color:#ccc;border:1px solid #2a2a2a;border-radius:5px;font-size:11px;padding:3px 4px;flex:1">' + opcoesEstagio + '</select>' +
+            '<select onchange="moverLead(\'' + tel + '\', this.value, \'' + est.id + '\')" style="background:#1a1a1a;color:#ccc;border:1px solid #2a2a2a;border-radius:5px;font-size:11px;padding:3px 4px;flex:1">' + opcoesEstagio + '</select>' +
             '</div></div>';
         }).join('');
 
-      colunasHtml += '<div class="lead-coluna" style="min-width:220px;max-width:220px;background:#111;border-radius:10px;border-top:2px solid ' + est.cor + ';flex-shrink:0">' +
+      colunasHtml += '<div class="lead-coluna" data-estagio="' + est.id + '" style="min-width:220px;max-width:220px;background:#111;border-radius:10px;border-top:2px solid ' + est.cor + ';flex-shrink:0">' +
         '<div style="padding:10px 12px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center">' +
         '<span style="font-size:11px;font-weight:700;text-transform:uppercase;color:' + est.cor + '">' + est.label + '</span>' +
         '<span class="lead-contagem" style="font-size:11px;background:#1e1e1e;padding:1px 7px;border-radius:8px;color:#888">' + cards.length + '</span>' +
         '</div>' +
-        '<div style="padding:8px;max-height:65vh;overflow-y:auto">' + cardsHtml + '</div>' +
+        '<div class="lead-cards" style="padding:8px;max-height:65vh;overflow-y:auto">' + cardsHtml + '</div>' +
         '</div>';
     });
 
@@ -2965,10 +3020,25 @@ app.get("/painel", async (req, res) => {
       ' .then(d => { if (d.ok) { alert("Template enviado com sucesso!"); document.getElementById("novo-tel").value = ""; } else alert("Erro: " + (d.erro||"falha no envio")); })' +
       ' .catch(() => alert("Erro de conexão"));' +
       '}' +
-      'function moverLead(tel, novoEstagio) {' +
+      'function atualizarContagens() {' +
+      ' document.querySelectorAll(".lead-coluna").forEach(function(col) {' +
+      ' var contagem = col.querySelector(".lead-contagem");' +
+      ' if (contagem) contagem.textContent = col.querySelectorAll(".lead-card").length;' +
+      ' });' +
+      '}' +
+      'function moverLead(tel, novoEstagio, estagioAtual) {' +
       ' fetch("/crm/mover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ telefone: tel, estagio: novoEstagio }) })' +
       ' .then(r => r.json())' +
-      ' .then(d => { if (d.ok) location.reload(); else alert("Erro ao mover lead"); })' +
+      ' .then(d => {' +
+      ' if (!d.ok) { alert("Erro ao mover lead"); return; }' +
+      ' var card = document.querySelector(\'.lead-card[data-tel="\' + tel + \'"]\');' +
+      ' var colDestino = document.querySelector(\'.lead-coluna[data-estagio="\' + novoEstagio + \'"] .lead-cards\');' +
+      ' if (!card || !colDestino) { location.reload(); return; }' +
+      ' var vazio = colDestino.querySelector("p");' +
+      ' if (vazio) vazio.remove();' +
+      ' colDestino.insertBefore(card, colDestino.firstChild);' +
+      ' atualizarContagens();' +
+      ' })' +
       ' .catch(() => alert("Erro de conexão ao mover lead"));' +
       '}' +
       'function filtrarLeads(termo) {' +
@@ -3223,9 +3293,17 @@ app.get("/painel/chat/:tel", async (req, res) => {
       avisoErro = '<div style="background:#3a0a0a;color:#f44336;padding:10px 14px;font-size:12px;border-bottom:1px solid #f44336">⚠️ Erro ao enviar a mensagem. Tente de novo.</div>';
     }
 
-    let msgsHtml = mensagens.map(m => {
+    let msgsHtml = '';
+    let ultimaDataRenderizada = null;
+    for (const m of mensagens) {
       const tipo = m.tipo || 'client';
-      const hora = m.criado_em ? new Date(m.criado_em).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
+      const dataObjMsg = m.criado_em ? new Date(m.criado_em) : null;
+      const dataLabel = dataObjMsg ? dataObjMsg.toLocaleDateString('pt-BR', {day:'2-digit',month:'2-digit',year:'2-digit'}) : '';
+      if (dataLabel && dataLabel !== ultimaDataRenderizada) {
+        msgsHtml += '<div style="text-align:center;margin:14px 0"><span style="background:#1a1a1a;color:#777;font-size:10px;padding:3px 12px;border-radius:10px;letter-spacing:.3px">' + dataLabel + '</span></div>';
+        ultimaDataRenderizada = dataLabel;
+      }
+      const hora = dataObjMsg ? dataObjMsg.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
       const alinha = tipo === 'client' || tipo === 'client_foto' ? 'flex-start' : 'flex-end';
       const bg = (tipo === 'client' || tipo === 'client_foto') ? '#1e1e1e' : tipo === 'sara' || tipo === 'sara_fotos' ? '#1a3a1a' : tipo === 'sistema' ? '#1a1a2e' : '#2a1a00';
       const cor = (tipo === 'client' || tipo === 'client_foto') ? '#ddd' : tipo === 'sara' || tipo === 'sara_fotos' ? '#b8e6b8' : tipo === 'sistema' ? '#555' : '#f0c060';
@@ -3241,9 +3319,7 @@ app.get("/painel/chat/:tel", async (req, res) => {
             '<div style="font-size:11px;color:#81c784;margin-bottom:6px">📸 ' + urlsFotos.length + ' foto(s) do ' + String(modelo).replace(/</g,'&lt;') + ' enviadas</div>' +
             '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
             urlsFotos.map(url =>
-              '<a href="' + url + '" target="_blank">' +
-              '<img src="' + url + '" style="width:80px;height:60px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' +
-              '</a>'
+              '<img src="' + url + '" onclick="abrirFoto(this.src)" style="width:80px;height:60px;object-fit:cover;border-radius:4px;cursor:zoom-in" onerror="this.style.display=\'none\'">'
             ).join('') +
             '</div></div>';
         } catch(e) {
@@ -3254,8 +3330,8 @@ app.get("/painel/chat/:tel", async (req, res) => {
           const dados = JSON.parse(m.texto || '{}');
           const caption = dados.caption ? '<div style="font-size:11px;color:#aaa;margin-top:4px">' + String(dados.caption).replace(/</g,'&lt;') + '</div>' : '';
           if (dados.url) {
-            conteudo = '<img src="' + dados.url + '" style="max-width:100%;border-radius:6px;display:block" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'block\'">' +
-              '<div style="display:none;color:#888;font-size:12px">📷 Foto (URL expirada)</div>' + caption;
+            conteudo = '<img src="' + dados.url + '" onclick="abrirFoto(this.src)" style="max-width:100%;border-radius:6px;display:block;cursor:zoom-in" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'block\'">' +
+              '<div style="display:none;color:#888;font-size:12px">📷 Foto indisponível (link expirou antes de ser arquivada)</div>' + caption;
           } else {
             conteudo = '<div style="color:#888;font-size:12px">📷 Foto recebida' + (dados.caption ? ': ' + dados.caption : '') + '</div>';
           }
@@ -3284,15 +3360,15 @@ app.get("/painel/chat/:tel", async (req, res) => {
         }
       }
 
-      if (tipo === 'sistema') return '';
+      if (tipo === 'sistema') continue;
 
-      return '<div style="display:flex;justify-content:' + alinha + ';margin-bottom:8px">' +
+      msgsHtml += '<div style="display:flex;justify-content:' + alinha + ';margin-bottom:8px">' +
         '<div style="max-width:82%">' +
         '<div style="font-size:9px;color:#555;margin-bottom:2px;text-align:' + (alinha==='flex-start'?'left':'right') + '">' + label + '</div>' +
-        (tipo === 'client_foto' ? conteudo : conteudo) +
+        conteudo +
         '<div style="font-size:9px;color:#444;margin-top:2px;text-align:' + (alinha==='flex-start'?'left':'right') + '">' + hora + statusIcone + '</div>' +
         '</div></div>';
-    }).join('');
+    }
 
     const html = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + formatado + '</title>' +
       '<style>body{margin:0;font-family:-apple-system,sans-serif;background:#0a0a0a;color:#e0e0e0}' +
@@ -3342,6 +3418,37 @@ app.get("/painel/chat/:tel", async (req, res) => {
       '<textarea name="texto" placeholder="Enviar como Sarah..."></textarea>' +
       '<button type="submit">→</button>' +
       '</form>' +
+      '<div id="lightbox" onclick="fecharFoto()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:999;align-items:center;justify-content:center;cursor:zoom-out">' +
+      '<img id="lightbox-img" style="max-width:92%;max-height:92%;border-radius:6px" onclick="event.stopPropagation()">' +
+      '</div>' +
+      '<script>' +
+      'function abrirFoto(src) { document.getElementById("lightbox-img").src = src; document.getElementById("lightbox").style.display = "flex"; }' +
+      'function fecharFoto() { document.getElementById("lightbox").style.display = "none"; }' +
+      'document.addEventListener("keydown", function(e) { if (e.key === "Escape") fecharFoto(); });' +
+      'var ultimoTotalMsgs = ' + mensagens.length + ';' +
+      'var telAtual = "' + tel + '";' +
+      'function verificarNovasMensagens() {' +
+      ' fetch("/painel/mensagens/" + telAtual).then(function(r){return r.json();}).then(function(d) {' +
+      '  var total = (d.mensagens || []).length;' +
+      '  if (total > ultimoTotalMsgs) {' +
+      '   var textarea = document.querySelector("textarea[name=texto]");' +
+      '   if (textarea && textarea.value.trim()) {' +
+      '    var banner = document.getElementById("banner-novas");' +
+      '    if (!banner) {' +
+      '     banner = document.createElement("div");' +
+      '     banner.id = "banner-novas";' +
+      '     banner.style.cssText = "position:sticky;top:0;background:#f0a500;color:#000;text-align:center;padding:7px;font-size:12px;font-weight:700;cursor:pointer;z-index:20";' +
+      '     banner.textContent = "\\uD83D\\uDD14 Nova mensagem chegou — clique pra atualizar";' +
+      '     banner.onclick = function() { location.reload(); };' +
+      '     var msgsEl = document.querySelector(".msgs");' +
+      '     if (msgsEl) msgsEl.insertAdjacentElement("beforebegin", banner);' +
+      '    }' +
+      '   } else { location.reload(); }' +
+      '  }' +
+      ' }).catch(function(){});' +
+      '}' +
+      'setInterval(verificarNovasMensagens, 6000);' +
+      '</script>' +
       '</body></html>';
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
