@@ -1298,6 +1298,9 @@ async function sincronizarEstoque() {
       estoqueAtual = veiculosSupabase.map(v => ({
         id: v.id,
         modelo: `${v.marca || ""} ${v.modelo || ""} ${v.versao || ""}`.trim(),
+        marca: v.marca || "",
+        modeloBase: v.modelo || "",
+        versaoTexto: v.versao || "",
         ano: v.ano_modelo || v.ano_fabricacao,
         km: v.km,
         preco: v.preco,
@@ -1459,17 +1462,49 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   return ePedido.some(p => t.includes(p));
 }
 
+// Palavras genéricas demais para identificar um veículo específico (conectivos comuns em
+// português + termos de vistoria/ficha técnica que aparecem em qualquer anúncio/laudo).
+// Adicionado 2026-09-02: sem esse filtro, "com"/"carroceria" (presentes na versão de um
+// anúncio qualquer, ex: Kia Bongo "...RD com carroceria") batiam com o texto genérico que a
+// própria Sara gera ao analisar fotos de avaliação de troca ("Carroceria limpa... com pintura
+// preservada..."), fazendo o sistema "confirmar" um veículo errado no CRM (caso Humberto
+// Juncal, 2026-09-01: veiculo_interesse virou "Kia Bongo..." numa conversa 100% sobre Prisma).
+const STOPWORDS_VEICULO = new Set([
+  "com", "para", "sem", "dos", "das", "por", "que", "uma", "umas", "uns", "dois", "duas",
+  "dele", "dela", "seu", "sua", "seus", "suas", "este", "esta", "esse", "essa", "isso",
+  "muito", "pouco", "mais", "menos", "bem", "mal", "tudo", "nada", "aqui", "ali", "onde",
+  "quando", "como", "porque", "porem", "porém", "mas", "também", "tambem", "ainda",
+  "depois", "antes", "agora", "carroceria", "completo", "completa", "original", "originais",
+  "conservado", "conservada", "estado", "geral", "bom", "boa", "otimo", "ótimo", "excelente",
+  "novo", "nova", "usado", "usada", "simples", "cabine", "flex", "gasolina", "alcool",
+  "álcool", "diesel", "manual", "automatico", "automático", "aut", "mec", "top", "full",
+  "plus", "comfort", "confort", "cvt", "turbo", "dlx", "glx", "gls", "exl", "ltz", "lt",
+  "ls", "sel", "cli", "cd"
+]);
+
+function extrairPalavrasRelevantes(texto) {
+  return limparTexto(texto || "").toLowerCase().split(/\s+/)
+    .filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p) && !STOPWORDS_VEICULO.has(p));
+}
+
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   const mensagensRecentes = [
     { role: "user", content: texto },
     ...(historicoConversa || []).slice().reverse()
   ];
 
+  // Palavras "fortes" (marca/modelo) precisam bater pelo menos uma vez — palavras da versão
+  // ("simples", "4x2", etc, já filtradas de termos genéricos acima) só reforçam o placar,
+  // nunca decidem sozinhas. Isso evita que termos soltos e genéricos da versão de UM anúncio
+  // (ex: "carroceria") sejam confundidos com o veículo que o cliente está falando de verdade.
   function pontuarVeiculo(v, textoAlvo) {
-    const modelo = limparTexto(v.modelo || "").toLowerCase();
-    const palavrasModelo = modelo.split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
-    if (!palavrasModelo.length) return 0;
-    let score = palavrasModelo.filter(p => textoAlvo.includes(p)).length;
+    const palavrasFortes = extrairPalavrasRelevantes(`${v.marca || ""} ${v.modeloBase || v.modelo || ""}`);
+    if (!palavrasFortes.length) return 0;
+    const acertosFortes = palavrasFortes.filter(p => textoAlvo.includes(p)).length;
+    if (acertosFortes === 0) return 0;
+    const palavrasFracas = extrairPalavrasRelevantes(v.versaoTexto || "");
+    const acertosFracos = palavrasFracas.filter(p => textoAlvo.includes(p)).length;
+    let score = acertosFortes * 2 + acertosFracos;
     if (v.ano && textoAlvo.includes(String(v.ano))) score += 1;
     return score;
   }
@@ -1499,10 +1534,9 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
 function contarVeiculosAmbiguos(texto, estoque) {
   const t = texto.toLowerCase();
   function pontuar(v) {
-    const modelo = limparTexto(v.modelo || "").toLowerCase();
-    const palavras = modelo.split(/\s+/).filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p));
-    if (!palavras.length) return 0;
-    return palavras.filter(p => t.includes(p)).length;
+    const palavrasFortes = extrairPalavrasRelevantes(`${v.marca || ""} ${v.modeloBase || v.modelo || ""}`);
+    if (!palavrasFortes.length) return 0;
+    return palavrasFortes.filter(p => t.includes(p)).length;
   }
   const candidatos = estoque.filter(v => pontuar(v) >= 1);
   return candidatos;
