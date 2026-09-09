@@ -806,23 +806,33 @@ async function notificarMudancaEstagioAutomatica(from, estagio, gatilho) {
   } catch (e) { console.error("[CRM] Erro ao registrar alerta de mudança automática:", e.message); }
 }
 
-async function detectarEstagio(from, text, historico) {
+async function detectarEstagio(from, text, historico, ehRetry = false) {
   const t = text.toLowerCase();
   const hist = (historico || []).map(m => m.content || "").join(" ").toLowerCase();
 
-  const fraseComprouEmOutroLugar = ["comprei em outro lugar", "comprei outro carro", "fechei com outra loja", "já comprei", "acabei comprando outro"];
+  // "já comprei" sozinho é ambíguo (pode ser "já comprei [aqui/de vocês]" — venda ganha —
+  // tanto quanto "já comprei [em outro lugar]" — venda perdida). Removido daqui; só conta
+  // como "perdido" quando vem com um qualificador explícito de "em outro lugar".
+  const fraseComprouEmOutroLugar = ["comprei em outro lugar", "comprei outro carro", "fechei com outra loja", "já comprei em outro lugar", "já comprei outro carro", "acabei comprando outro"];
   const fraseComprouAqui = ["fechei", "comprei", "vou comprar", "vou fechar", "topo fechar", "bater o martelo", "pode fazer o contrato"];
 
-  if (fraseComprouEmOutroLugar.some(f => t.includes(f))) {
-    await atualizarEstagio(from, "perdido");
-    await notificarMudancaEstagioAutomatica(from, "perdido", fraseComprouEmOutroLugar.find(f => t.includes(f)));
-    return;
-  }
-  const gatilhoFechou = fraseComprouAqui.find(f => t.includes(f) && !temNegacaoAntes(t, f));
-  if (gatilhoFechou) {
-    await atualizarEstagio(from, "vendido");
-    await notificarMudancaEstagioAutomatica(from, "vendido", gatilhoFechou);
-    return;
+  // Mensagens reprocessadas pela fila de retry (mensagens_pendentes) podem ser textos antigos
+  // sendo reexecutados sem gerar uma nova linha em `mensagens` — não são sinal confiável o
+  // suficiente pra uma decisão de alto impacto e pouco reversível como vendido/perdido.
+  // Detectado em 2026-09-09: reprocessamento no boot marcou 4 leads dormentes como "perdido"
+  // e 1 como "vendido" sem nenhuma mensagem nova correspondente.
+  if (!ehRetry) {
+    if (fraseComprouEmOutroLugar.some(f => t.includes(f))) {
+      await atualizarEstagio(from, "perdido");
+      await notificarMudancaEstagioAutomatica(from, "perdido", fraseComprouEmOutroLugar.find(f => t.includes(f)));
+      return;
+    }
+    const gatilhoFechou = fraseComprouAqui.find(f => t.includes(f) && !temNegacaoAntes(t, f));
+    if (gatilhoFechou) {
+      await atualizarEstagio(from, "vendido");
+      await notificarMudancaEstagioAutomatica(from, "vendido", gatilhoFechou);
+      return;
+    }
   }
   if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir") || t.includes("vou visitar") || t.includes("amanhã às") || t.includes("amanha as") || t.includes("pode ser às") || t.includes("pode ser as")) {
     const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
@@ -2123,7 +2133,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
-  detectarEstagio(from, text, conversas[from]).catch(() => {});
+  detectarEstagio(from, text, conversas[from], ehRetry).catch(() => {});
 
   await carregarColetaCreditoPendente(from);
   if (coletaCredito[from]) {
