@@ -454,6 +454,46 @@ async function atualizarStatusSimulacao(telefone, resultado) {
   }
 }
 
+// 🚨 Guarda-freio determinístico: a IA às vezes "inventa" parcelas de financiamento mesmo
+// com a instrução no prompt pra nunca fazer isso — sobretudo depois de um desconto de PREÇO
+// ser autorizado pelo consultor, que não tem nenhuma relação com aprovação de crédito na
+// financeira. Isso causou o caso da Cristiane (5551993498601, 2026-09-18): Sara confirmou
+// "consegui! 24x de R$1.663..." com a simulação real ainda "pendente" na tabela
+// simulacoes_credito, cliente foi até a loja achando que tava aprovado e não estava.
+// Este check roda em código (não depende do modelo obedecer o prompt) antes de QUALQUER
+// mensagem sair pro cliente.
+function contemOfertaFinanciamentoConcreta(texto) {
+  if (!texto) return false;
+  return /\d{1,3}\s*x\s*(?:de\s*)?r\$\s*[\d.,]+/i.test(texto);
+}
+
+async function temSimulacaoPendente(telefone) {
+  try {
+    const { data } = await supabase.from("simulacoes_credito")
+      .select("id")
+      .eq("telefone", telefone)
+      .eq("status", "pendente")
+      .limit(1);
+    return !!(data && data.length > 0);
+  } catch (e) {
+    console.error("[Crédito] Erro ao checar simulação pendente:", e.message);
+    return false;
+  }
+}
+
+async function bloquearSeParcelaSemSimulacaoReal(telefone, reply) {
+  if (!contemOfertaFinanciamentoConcreta(reply)) return reply;
+  if (!(await temSimulacaoPendente(telefone))) return reply;
+  console.warn(`[Crédito] 🚨 Bloqueado: resposta tentou confirmar parcelas pra ${telefone} sem resultado real da financeira (simulação ainda pendente).`);
+  try {
+    const numero = telefone.replace(/\D/g, "");
+    await enviarTexto(NUMERO_AUGUSTO, `⚠️ *Sara tentou confirmar parcelas de financiamento sem simulação real*\nCliente: ${numero}\nA simulação de crédito desse cliente ainda está PENDENTE (nenhum resultado real informado). Bloqueei a mensagem automaticamente pra não passar valor errado.\nSe já tiver o resultado da financeira, responda: SIMULACAO ${numero} [resultado]`);
+  } catch (e) {
+    console.error("[Crédito] Erro ao notificar bloqueio de parcela:", e.message);
+  }
+  return "Ainda estou aguardando o retorno da nossa equipe sobre a sua simulação de crédito — assim que sair o resultado certinho da financeira, te aviso por aqui! 😊";
+}
+
 function detectarPedidoDesconto(texto) {
   const t = texto.toLowerCase().trim();
   const frases = [
@@ -1783,7 +1823,7 @@ Etapa 3 (só após tudo): ${versaoIncerta ? `Encontramos mais de uma versão pos
 QUANDO ACHAR CARO: Pergunte qual parcela cabe no orçamento e tente adaptar.
 QUANDO DISSER "VOU PENSAR": Pergunte o que ficou na dúvida antes de encerrar.
 
-🚨 FINANCIAMENTO — REGRA CRÍTICA E ABSOLUTA: Você NUNCA deve calcular, estimar ou informar nenhum valor de parcela diretamente na conversa, mesmo que o cliente peça, insista ou pareça impaciente. Isso vale mesmo que você "saiba" a fórmula ou a taxa — o cálculo só pode ser feito depois de coletar nome, CPF, data de nascimento e se o cliente tem CNH, porque o valor real depende da aprovação na financeira, não de uma conta simples. Se o cliente perguntar sobre parcela, financiamento, ou quanto ficaria por mês, diga algo como "Posso fazer uma simulação certinha pra você! Só preciso de alguns dados rapidinho" e deixe o sistema iniciar a coleta. NUNCA mencione números de parcela, taxa de juros, ou fórmulas de cálculo na sua resposta.
+🚨 FINANCIAMENTO — REGRA CRÍTICA E ABSOLUTA: Você NUNCA deve calcular, estimar ou informar nenhum valor de parcela diretamente na conversa, mesmo que o cliente peça, insista ou pareça impaciente. Isso vale mesmo que você "saiba" a fórmula ou a taxa — o cálculo só pode ser feito depois de coletar nome, CPF, data de nascimento e se o cliente tem CNH, porque o valor real depende da aprovação na financeira, não de uma conta simples. Se o cliente perguntar sobre parcela, financiamento, ou quanto ficaria por mês, diga algo como "Posso fazer uma simulação certinha pra você! Só preciso de alguns dados rapidinho" e deixe o sistema iniciar a coleta. NUNCA mencione números de parcela, taxa de juros, ou fórmulas de cálculo na sua resposta. 🚨 ISSO CONTINUA VALENDO mesmo depois que os dados já foram coletados e encaminhados "pra equipe fazer a simulação" — nesse estado, o financiamento está PENDENTE até uma instrução explícita do sistema dizendo que o resultado real da financeira chegou (via comando SIMULACAO). Um desconto de PREÇO autorizado pelo consultor, uma contraproposta, ou qualquer outra condição especial NÃO é a mesma coisa que financiamento aprovado — nunca use a autorização de um desconto pra também confirmar parcelas. Enquanto não chegar o resultado real da financeira, se o cliente perguntar do financiamento, diga que ainda está aguardando o retorno.
 
 🚨 CNH — REGRA CRÍTICA: Se o cliente mencionar espontaneamente que não tem CNH (carteira de motorista), antes ou fora da coleta estruturada de dados de financiamento, você NUNCA deve dar conselhos, sugestões ou alternativas por conta própria (não sugira renovar a CNH, não sugira juntar uma entrada como alternativa, não invente outras ideias). Apenas confirme educadamente que anotou a informação e que o consultor vai avaliar as opções com ele — nada além disso. Essa decisão (a qual financeira encaminhar, alternativas de negociação) é exclusivamente do consultor humano. Se a coleta de dados de financiamento ainda não tiver perguntado sobre CNH, o sistema já inclui essa pergunta automaticamente na etapa correta — você não precisa (e não deve) perguntar por conta própria fora desse fluxo.
 
@@ -2004,7 +2044,8 @@ async function processarComandoConsultor(from, text) {
         { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
       );
 
-      const replyCP = limparRespostaIA(claudeCP.data.content[0].text);
+      let replyCP = limparRespostaIA(claudeCP.data.content[0].text);
+      replyCP = await bloquearSeParcelaSemSimulacaoReal(telefoneClienteCP, replyCP);
       conversas[telefoneClienteCP].push({ role: "assistant", content: replyCP });
 
       await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -2047,7 +2088,7 @@ async function processarComandoConsultor(from, text) {
   await salvarMensagem(telefoneCliente, "sistema", registroDesconto);
 
   const msgSistema = autorizado
-    ? `[Sistema: nosso consultor autorizou o desconto. Informe ao cliente que conseguimos fazer uma condição especial e tente fechar o negócio. Seja entusiasta mas natural!]`
+    ? `[Sistema: nosso consultor autorizou o desconto NO PREÇO. Informe ao cliente que conseguimos fazer uma condição especial e tente fechar o negócio. Seja entusiasta mas natural! 🚨 ISSO É SÓ SOBRE O PREÇO — não é aprovação de financiamento. Se o cliente estiver financiando e não houver um resultado real da financeira (comando SIMULACAO já respondido) para ele, NÃO calcule nem informe valores de parcela nessa mensagem, mesmo com o desconto aprovado. Fale apenas do valor/condição especial no preço; se ele perguntar de parcelas, diga que ainda está aguardando o retorno da financeira.]`
     : `[Sistema: nosso consultor não autorizou o desconto.${valorMinimo ? ` O valor mínimo que conseguimos fazer para esse veículo é R$ ${valorMinimo} — informe esse valor ao cliente como nossa melhor oferta.` : " Informe ao cliente que infelizmente o preço está firme, mas tente manter o interesse com outras vantagens como IPVA pago, facilidade de financiamento, etc."} Não mencione nomes.]`;
 
   if (!conversas[telefoneCliente]) {
@@ -2071,7 +2112,8 @@ async function processarComandoConsultor(from, text) {
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
 
-    const reply = limparRespostaIA(claude.data.content[0].text);
+    let reply = limparRespostaIA(claude.data.content[0].text);
+    reply = await bloquearSeParcelaSemSimulacaoReal(telefoneCliente, reply);
     conversas[telefoneCliente].push({ role: "assistant", content: reply });
 
     await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -2526,6 +2568,7 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       const respostaBloqueada = await verificarPropostaForaDoPreco(from, reply, veiculoDaProposta);
       if (respostaBloqueada) reply = respostaBloqueada;
     }
+    reply = await bloquearSeParcelaSemSimulacaoReal(from, reply);
     conversas[from].push({ role: "assistant", content: reply });
 
     const respMeta = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
