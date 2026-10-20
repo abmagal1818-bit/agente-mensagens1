@@ -433,13 +433,16 @@ Faça a simulação nas financeiras e responda:
 
 async function salvarSimulacaoCredito(telefone, dados) {
   try {
-    await supabase.from("simulacoes_credito").insert({
+    const { data, error } = await supabase.from("simulacoes_credito").insert({
       telefone, nome: dados.nome, cpf: dados.cpf, nascimento: dados.nascimento,
       veiculo: dados.veiculo || null, entrada: dados.entrada || null, tem_cnh: dados.temCnh || null, status: "pendente"
-    });
-    console.log(`[Crédito] ✅ Salvo no Supabase: ${telefone}`);
+    }).select("id").single();
+    if (error) throw error;
+    console.log(`[Crédito] ✅ Salvo no Supabase: ${telefone} (id ${data?.id})`);
+    return data?.id || null;
   } catch (e) {
     console.error("[Crédito] Erro ao salvar (tabela pode não existir ainda):", e.message);
+    return null;
   }
 }
 
@@ -452,6 +455,105 @@ async function atualizarStatusSimulacao(telefone, resultado) {
   } catch (e) {
     console.error("[Crédito] Erro ao atualizar status:", e.message);
   }
+}
+
+// ─────────────────────────────────────────────
+// SIMULAÇÃO MULTI-BANCO (adaptadores por banco)
+// ─────────────────────────────────────────────
+// Cada banco tem sua própria função "adaptadora". Todas recebem o mesmo
+// formato de entrada e devolvem o mesmo formato de saída, então o
+// orquestrador (simularTodosBancos) não precisa saber os detalhes de
+// cada API — só chama todas e junta o resultado.
+//
+// Formato de entrada (dados): { nome, cpf, nascimento, veiculoValor, entrada, prazoMeses }
+// Formato de saída: { banco, status: 'aprovado'|'negado'|'erro'|'nao_configurado',
+//                      taxa, parcela, cet, prazoMeses, mensagem, respostaBruta }
+//
+// IMPORTANTE: até termos a documentação oficial de cada banco, essas
+// funções ficam como STUB — checam se a credencial de API existe
+// (variável de ambiente) e, se não existir, retornam 'nao_configurado'
+// sem tentar nenhuma chamada real. Assim que a doc de um banco chegar,
+// é só preencher o corpo da função correspondente com a chamada real —
+// nada mais no sistema precisa mudar.
+
+async function simularPan(dados) {
+  const apiKey = process.env.PAN_API_KEY;
+  if (!apiKey) return { banco: "Pan", status: "nao_configurado", mensagem: "PAN_API_KEY não configurada ainda" };
+  try {
+    // TODO: substituir pelo endpoint real assim que o Pan enviar a documentação.
+    // Exemplo do formato esperado (ajustar conforme doc real):
+    // const res = await axios.post("https://api.bancopan.com.br/.../simulacao", {
+    //   cpf: dados.cpf, valorVeiculo: dados.veiculoValor, valorEntrada: dados.entrada, prazoMeses: dados.prazoMeses
+    // }, { headers: { Authorization: `Bearer ${apiKey}` } });
+    // return { banco: "Pan", status: res.data.aprovado ? "aprovado" : "negado", taxa: res.data.taxa, parcela: res.data.valorParcela, cet: res.data.cet, prazoMeses: res.data.prazo, respostaBruta: res.data };
+    return { banco: "Pan", status: "erro", mensagem: "Adaptador ainda não implementado (aguardando documentação da API)" };
+  } catch (e) {
+    return { banco: "Pan", status: "erro", mensagem: e.response?.data?.mensagem || e.message };
+  }
+}
+
+async function simularSantander(dados) {
+  const apiKey = process.env.SANTANDER_API_KEY;
+  if (!apiKey) return { banco: "Santander", status: "nao_configurado", mensagem: "SANTANDER_API_KEY não configurada ainda" };
+  try {
+    // TODO: substituir pelo endpoint real assim que o Santander enviar a documentação.
+    return { banco: "Santander", status: "erro", mensagem: "Adaptador ainda não implementado (aguardando documentação da API)" };
+  } catch (e) {
+    return { banco: "Santander", status: "erro", mensagem: e.response?.data?.mensagem || e.message };
+  }
+}
+
+async function simularItau(dados) {
+  const apiKey = process.env.ITAU_API_KEY;
+  if (!apiKey) return { banco: "Itaú", status: "nao_configurado", mensagem: "ITAU_API_KEY não configurada ainda — confirmar com o banco se é API ou BPO antes de habilitar" };
+  try {
+    // TODO: substituir pelo endpoint real assim que o Itaú confirmar o modelo de integração (API x BPO).
+    return { banco: "Itaú", status: "erro", mensagem: "Adaptador ainda não implementado (aguardando documentação da API)" };
+  } catch (e) {
+    return { banco: "Itaú", status: "erro", mensagem: e.response?.data?.mensagem || e.message };
+  }
+}
+
+// Mapa central de bancos habilitados — pra ligar/desligar um banco (ex: se
+// a API cair ou o contrato mudar) é só comentar/remover a linha aqui,
+// sem precisar mexer em mais nada.
+const ADAPTADORES_BANCOS = {
+  Pan: simularPan,
+  Santander: simularSantander,
+  Itaú: simularItau
+};
+
+// Roda todos os bancos configurados em paralelo. Um banco fora do ar ou
+// com erro não trava os outros (Promise.allSettled). Salva cada resultado
+// na tabela simulacoes_bancos e devolve a lista consolidada.
+async function simularTodosBancos(dados, simulacaoId = null, telefone = null) {
+  const bancos = Object.keys(ADAPTADORES_BANCOS);
+  const resultados = await Promise.allSettled(bancos.map(b => ADAPTADORES_BANCOS[b](dados)));
+  const consolidado = resultados.map((r, i) => {
+    if (r.status === "fulfilled") return r.value;
+    return { banco: bancos[i], status: "erro", mensagem: r.reason?.message || "Falha desconhecida" };
+  });
+
+  for (const item of consolidado) {
+    try {
+      await supabase.from("simulacoes_bancos").insert({
+        simulacao_id: simulacaoId,
+        telefone: telefone || "",
+        banco: item.banco,
+        status: item.status,
+        taxa: item.taxa || null,
+        parcela: item.parcela || null,
+        cet: item.cet || null,
+        prazo_meses: item.prazoMeses || null,
+        mensagem: item.mensagem || null,
+        resposta_bruta: item.respostaBruta || null
+      });
+    } catch (e) {
+      console.error(`[SimulaçãoBancos] Erro ao salvar resultado de ${item.banco}:`, e.message);
+    }
+  }
+
+  return consolidado;
 }
 
 // 🚨 Guarda-freio determinístico: a IA às vezes "inventa" parcelas de financiamento mesmo
@@ -2411,8 +2513,18 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       limparColetaCreditoPendente(from).catch(() => {});
 
       await notificarDadosCredito(from, dadosFinais);
-      await salvarSimulacaoCredito(from, dadosFinais);
+      const simulacaoIdCriada = await salvarSimulacaoCredito(from, dadosFinais);
       await atualizarEstagio(from, "negociacao", nomeVeiculo);
+
+      // Dispara as simulações automáticas nos bancos (Pan/Santander/Itaú) em
+      // segundo plano — não bloqueia a resposta ao cliente. Enquanto os bancos
+      // reais não estiverem configurados, isso só grava "nao_configurado" na
+      // tabela simulacoes_bancos, sem efeito nenhum sobre o fluxo da Sara.
+      simularTodosBancos(
+        { nome: dadosFinais.nome, cpf: dadosFinais.cpf, nascimento: dadosFinais.nascimento, veiculoValor: null, entrada: dadosFinais.entrada, prazoMeses: null },
+        simulacaoIdCriada,
+        from
+      ).catch(e => console.error("[SimulaçãoBancos] Erro no orquestrador:", e.message));
 
       const primeiroNome = dadosFinais.nome.split(" ")[0];
       const primeiroNomeCapitalizado = primeiroNome.charAt(0).toUpperCase() + primeiroNome.slice(1).toLowerCase();
@@ -3754,6 +3866,90 @@ app.post("/painel/resolver", async (req, res) => {
   if (conversas[from]) delete conversas[from];
   if (from) conversasVisualizadas[from] = Date.now();
   res.json({ ok: true });
+});
+
+// ─────────────────────────────────────────────
+// PAINEL: SIMULAÇÃO MULTI-BANCO MANUAL
+// ─────────────────────────────────────────────
+// Formulário simples para o Augusto disparar uma simulação manualmente,
+// sem precisar passar pelo fluxo da Sara no WhatsApp.
+app.get("/painel/simulacao-manual", (req, res) => {
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Simulação Multi-Banco — Premium Automarcas</title>
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+        h2 { margin-bottom: 4px; }
+        label { display: block; margin-top: 14px; font-weight: bold; font-size: 14px; }
+        input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; font-size: 14px; }
+        button { margin-top: 20px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
+      </style>
+    </head>
+    <body>
+      <h2>Simulação Multi-Banco</h2>
+      <p style="color:#666;font-size:13px;">Preenche os dados e roda a simulação nos bancos configurados (Pan, Santander, Itaú).</p>
+      <form method="POST" action="/painel/simulacao-manual">
+        <label>Nome completo</label>
+        <input name="nome" required>
+        <label>CPF</label>
+        <input name="cpf" required>
+        <label>Data de nascimento</label>
+        <input name="nascimento" placeholder="dd/mm/aaaa">
+        <label>Valor do veículo (R$)</label>
+        <input name="veiculoValor" type="number" step="0.01">
+        <label>Valor de entrada (R$)</label>
+        <input name="entrada" type="number" step="0.01">
+        <label>Prazo (meses)</label>
+        <input name="prazoMeses" type="number">
+        <button type="submit">Rodar simulação</button>
+      </form>
+    </body>
+    </html>
+  `);
+});
+
+app.post("/painel/simulacao-manual", async (req, res) => {
+  try {
+    const { nome, cpf, nascimento, veiculoValor, entrada, prazoMeses } = req.body;
+    const resultados = await simularTodosBancos({
+      nome, cpf, nascimento,
+      veiculoValor: veiculoValor ? parseFloat(veiculoValor) : null,
+      entrada: entrada ? parseFloat(entrada) : null,
+      prazoMeses: prazoMeses ? parseInt(prazoMeses) : null
+    }, null, null);
+
+    const linhas = resultados.map(r => `
+      <tr>
+        <td style="padding:8px;border:1px solid #ddd;">${r.banco}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${r.status}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${r.taxa ?? "-"}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${r.parcela ?? "-"}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${r.cet ?? "-"}</td>
+        <td style="padding:8px;border:1px solid #ddd;">${r.mensagem ?? "-"}</td>
+      </tr>`).join("");
+
+    res.send(`
+      <html>
+      <head><meta charset="utf-8"><title>Resultado — Simulação Multi-Banco</title>
+      <style>body{font-family:Arial,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;}
+      table{border-collapse:collapse;width:100%;margin-top:16px;}
+      th{padding:8px;border:1px solid #ddd;background:#f3f3f3;text-align:left;}</style>
+      </head>
+      <body>
+        <h2>Resultado da simulação — ${nome}</h2>
+        <table>
+          <tr><th>Banco</th><th>Status</th><th>Taxa</th><th>Parcela</th><th>CET</th><th>Mensagem</th></tr>
+          ${linhas}
+        </table>
+        <p style="margin-top:20px;"><a href="/painel/simulacao-manual">← Nova simulação</a></p>
+      </body>
+      </html>
+    `);
+  } catch (e) {
+    res.status(500).send("Erro ao rodar simulação: " + e.message);
+  }
 });
 
 const PORT = process.env.PORT || 10000;
