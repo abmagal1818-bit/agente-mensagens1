@@ -465,8 +465,10 @@ async function atualizarStatusSimulacao(telefone, resultado) {
 // orquestrador (simularTodosBancos) não precisa saber os detalhes de
 // cada API — só chama todas e junta o resultado.
 //
-// Formato de entrada (dados): { nome, cpf, nascimento, veiculoValor, entrada, prazoMeses }
-// Formato de saída: { banco, status: 'aprovado'|'negado'|'erro'|'nao_configurado',
+// Formato de entrada (dados): { nome, cpf, nascimento, telefone, placa, veiculoValor, entrada, prazoMeses }
+// nome é opcional — nenhum banco listado abaixo precisa do nome pra simular, só do CPF
+// e, dependendo do banco, telefone, placa do veículo, valor do carro ou data de nascimento.
+// Formato de saída: { banco, status: 'aprovado'|'negado'|'erro'|'nao_configurado'|'dados_insuficientes',
 //                      taxa, parcela, cet, prazoMeses, mensagem, respostaBruta }
 //
 // IMPORTANTE: até termos a documentação oficial de cada banco, essas
@@ -476,14 +478,24 @@ async function atualizarStatusSimulacao(telefone, resultado) {
 // é só preencher o corpo da função correspondente com a chamada real —
 // nada mais no sistema precisa mudar.
 
+// Confere se os campos que aquele banco exige vieram preenchidos. Útil desde
+// já (mesmo em stub) pra pegar na hora os casos em que falta placa/telefone,
+// em vez de só descobrir isso quando a API real estiver ligada.
+function faltamCampos(dados, campos) {
+  return campos.filter(c => dados[c] === null || dados[c] === undefined || dados[c] === "");
+}
+
 async function simularPan(dados) {
+  // Pan exige CPF + telefone do cliente.
+  const faltando = faltamCampos(dados, ["cpf", "telefone"]);
+  if (faltando.length) return { banco: "Pan", status: "dados_insuficientes", mensagem: `Faltam: ${faltando.join(", ")}` };
   const apiKey = process.env.PAN_API_KEY;
   if (!apiKey) return { banco: "Pan", status: "nao_configurado", mensagem: "PAN_API_KEY não configurada ainda" };
   try {
     // TODO: substituir pelo endpoint real assim que o Pan enviar a documentação.
     // Exemplo do formato esperado (ajustar conforme doc real):
     // const res = await axios.post("https://api.bancopan.com.br/.../simulacao", {
-    //   cpf: dados.cpf, valorVeiculo: dados.veiculoValor, valorEntrada: dados.entrada, prazoMeses: dados.prazoMeses
+    //   cpf: dados.cpf, telefone: dados.telefone, valorVeiculo: dados.veiculoValor, valorEntrada: dados.entrada, prazoMeses: dados.prazoMeses
     // }, { headers: { Authorization: `Bearer ${apiKey}` } });
     // return { banco: "Pan", status: res.data.aprovado ? "aprovado" : "negado", taxa: res.data.taxa, parcela: res.data.valorParcela, cet: res.data.cet, prazoMeses: res.data.prazo, respostaBruta: res.data };
     return { banco: "Pan", status: "erro", mensagem: "Adaptador ainda não implementado (aguardando documentação da API)" };
@@ -493,6 +505,9 @@ async function simularPan(dados) {
 }
 
 async function simularSantander(dados) {
+  // Santander exige CPF + placa do veículo + valor do veículo (abre a tela já com aprovação/negação).
+  const faltando = faltamCampos(dados, ["cpf", "placa", "veiculoValor"]);
+  if (faltando.length) return { banco: "Santander", status: "dados_insuficientes", mensagem: `Faltam: ${faltando.join(", ")}` };
   const apiKey = process.env.SANTANDER_API_KEY;
   if (!apiKey) return { banco: "Santander", status: "nao_configurado", mensagem: "SANTANDER_API_KEY não configurada ainda" };
   try {
@@ -504,6 +519,9 @@ async function simularSantander(dados) {
 }
 
 async function simularItau(dados) {
+  // Itaú exige CPF + placa do veículo.
+  const faltando = faltamCampos(dados, ["cpf", "placa"]);
+  if (faltando.length) return { banco: "Itaú", status: "dados_insuficientes", mensagem: `Faltam: ${faltando.join(", ")}` };
   const apiKey = process.env.ITAU_API_KEY;
   if (!apiKey) return { banco: "Itaú", status: "nao_configurado", mensagem: "ITAU_API_KEY não configurada ainda — confirmar com o banco se é API ou BPO antes de habilitar" };
   try {
@@ -514,14 +532,51 @@ async function simularItau(dados) {
   }
 }
 
+async function simularBV(dados) {
+  // BV exige CPF + placa do veículo; às vezes também pede data de nascimento.
+  const faltando = faltamCampos(dados, ["cpf", "placa"]);
+  if (faltando.length) return { banco: "BV", status: "dados_insuficientes", mensagem: `Faltam: ${faltando.join(", ")}` };
+  const apiKey = process.env.BV_API_KEY;
+  if (!apiKey) return { banco: "BV", status: "nao_configurado", mensagem: "BV_API_KEY não configurada ainda" };
+  try {
+    // TODO: substituir pelo endpoint real assim que o BV enviar a documentação.
+    return { banco: "BV", status: "erro", mensagem: "Adaptador ainda não implementado (aguardando documentação da API)" };
+  } catch (e) {
+    return { banco: "BV", status: "erro", mensagem: e.response?.data?.mensagem || e.message };
+  }
+}
+
 // Mapa central de bancos habilitados — pra ligar/desligar um banco (ex: se
 // a API cair ou o contrato mudar) é só comentar/remover a linha aqui,
 // sem precisar mexer em mais nada.
 const ADAPTADORES_BANCOS = {
   Pan: simularPan,
   Santander: simularSantander,
-  Itaú: simularItau
+  Itaú: simularItau,
+  BV: simularBV
 };
+
+// Busca placa e valor do veículo no Supabase a partir do nome (marca+modelo+versão)
+// que a Sara já tem salvo no estado da conversa. Hoje (2026-10) nenhum veículo
+// tem a placa cadastrada no Supabase ainda — isso precisa ser alimentado a partir
+// do MobiAuto (ou outra fonte) separadamente. Essa função já fica pronta: no dia
+// que a placa estiver no banco, a simulação automática da Sara passa a enviá-la
+// sem precisar tocar em mais nada aqui.
+async function buscarVeiculoParaSimulacao(nomeVeiculo) {
+  if (!nomeVeiculo) return { placa: null, veiculoValor: null };
+  try {
+    const { data } = await supabase
+      .from("veiculos")
+      .select("placa, preco, marca, modelo, versao")
+      .eq("status", "disponivel");
+    const alvo = (nomeVeiculo || "").toLowerCase();
+    const match = (data || []).find(v => alvo.includes(`${v.marca || ""} ${v.modelo || ""}`.trim().toLowerCase()));
+    return { placa: match?.placa || null, veiculoValor: match?.preco || null };
+  } catch (e) {
+    console.error("[SimulaçãoBancos] Erro ao buscar placa/valor do veículo:", e.message);
+    return { placa: null, veiculoValor: null };
+  }
+}
 
 // Roda todos os bancos configurados em paralelo. Um banco fora do ar ou
 // com erro não trava os outros (Promise.allSettled). Salva cada resultado
@@ -2516,15 +2571,24 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       const simulacaoIdCriada = await salvarSimulacaoCredito(from, dadosFinais);
       await atualizarEstagio(from, "negociacao", nomeVeiculo);
 
-      // Dispara as simulações automáticas nos bancos (Pan/Santander/Itaú) em
-      // segundo plano — não bloqueia a resposta ao cliente. Enquanto os bancos
-      // reais não estiverem configurados, isso só grava "nao_configurado" na
-      // tabela simulacoes_bancos, sem efeito nenhum sobre o fluxo da Sara.
-      simularTodosBancos(
-        { nome: dadosFinais.nome, cpf: dadosFinais.cpf, nascimento: dadosFinais.nascimento, veiculoValor: null, entrada: dadosFinais.entrada, prazoMeses: null },
-        simulacaoIdCriada,
-        from
-      ).catch(e => console.error("[SimulaçãoBancos] Erro no orquestrador:", e.message));
+      // Dispara as simulações automáticas nos bancos (Pan/Santander/Itaú/BV) em
+      // segundo plano — não bloqueia a resposta ao cliente. Busca placa e valor
+      // do veículo no Supabase antes (hoje retorna placa=null pra todos, porque
+      // nenhum veículo tem placa cadastrada ainda — ver buscarVeiculoParaSimulacao).
+      // Enquanto os bancos reais não estiverem configurados, isso só grava
+      // "nao_configurado"/"dados_insuficientes" na tabela simulacoes_bancos,
+      // sem efeito nenhum sobre o fluxo da Sara.
+      buscarVeiculoParaSimulacao(nomeVeiculo).then(({ placa, veiculoValor }) => {
+        return simularTodosBancos(
+          {
+            nome: dadosFinais.nome, cpf: dadosFinais.cpf, nascimento: dadosFinais.nascimento,
+            telefone: from, placa, veiculoValor,
+            entrada: dadosFinais.entrada, prazoMeses: null
+          },
+          simulacaoIdCriada,
+          from
+        );
+      }).catch(e => console.error("[SimulaçãoBancos] Erro no orquestrador:", e.message));
 
       const primeiroNome = dadosFinais.nome.split(" ")[0];
       const primeiroNomeCapitalizado = primeiroNome.charAt(0).toUpperCase() + primeiroNome.slice(1).toLowerCase();
@@ -3914,15 +3978,19 @@ app.get("/painel/simulacao-manual", (req, res) => {
       ${tabsCrm("/painel/simulacao-manual")}
       <div class="conteudo">
         <h2>💳 Simulação Multi-Banco</h2>
-        <p style="color:#888;font-size:13px;">Preenche os dados e roda a simulação nos bancos configurados (Pan, Santander, Itaú).</p>
+        <p style="color:#888;font-size:13px;">Preenche os dados e roda a simulação nos bancos configurados (Pan, Santander, Itaú, BV). Nome é opcional — nenhum banco pede pra simular.</p>
         <form method="POST" action="/painel/simulacao-manual">
-          <label>Nome completo</label>
-          <input name="nome" required>
+          <label>Nome completo <span style="color:#555;font-weight:400">(opcional)</span></label>
+          <input name="nome">
           <label>CPF</label>
           <input name="cpf" required>
-          <label>Data de nascimento</label>
+          <label>Telefone <span style="color:#555;font-weight:400">(Pan exige)</span></label>
+          <input name="telefone" placeholder="(51) 99999-9999">
+          <label>Data de nascimento <span style="color:#555;font-weight:400">(BV às vezes exige)</span></label>
           <input name="nascimento" placeholder="dd/mm/aaaa">
-          <label>Valor do veículo (R$)</label>
+          <label>Placa do veículo <span style="color:#555;font-weight:400">(Itaú, Santander e BV exigem)</span></label>
+          <input name="placa" placeholder="ABC1D23">
+          <label>Valor do veículo (R$) <span style="color:#555;font-weight:400">(Santander exige)</span></label>
           <input name="veiculoValor" type="number" step="0.01">
           <label>Valor de entrada (R$)</label>
           <input name="entrada" type="number" step="0.01">
@@ -3938,15 +4006,15 @@ app.get("/painel/simulacao-manual", (req, res) => {
 
 app.post("/painel/simulacao-manual", async (req, res) => {
   try {
-    const { nome, cpf, nascimento, veiculoValor, entrada, prazoMeses } = req.body;
+    const { nome, cpf, telefone, nascimento, placa, veiculoValor, entrada, prazoMeses } = req.body;
     const resultados = await simularTodosBancos({
-      nome, cpf, nascimento,
+      nome: nome || null, cpf, telefone: telefone || null, nascimento: nascimento || null, placa: placa || null,
       veiculoValor: veiculoValor ? parseFloat(veiculoValor) : null,
       entrada: entrada ? parseFloat(entrada) : null,
       prazoMeses: prazoMeses ? parseInt(prazoMeses) : null
-    }, null, null);
+    }, null, telefone || null);
 
-    const corStatus = (s) => s === "aprovado" ? "#4caf50" : s === "negado" ? "#f44336" : s === "nao_configurado" ? "#666" : "#f0a500";
+    const corStatus = (s) => s === "aprovado" ? "#4caf50" : s === "negado" ? "#f44336" : (s === "nao_configurado" || s === "dados_insuficientes") ? "#666" : "#f0a500";
     const linhas = resultados.map(r => `
       <tr>
         <td style="padding:10px;border-bottom:1px solid #1a1a1a;color:#fff;font-weight:600">${r.banco}</td>
@@ -3977,7 +4045,7 @@ app.post("/painel/simulacao-manual", async (req, res) => {
         <header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>
         ${tabsCrm("/painel/simulacao-manual")}
         <div class="conteudo">
-          <h2 style="color:#fff;font-size:18px;margin:0 0 4px">Resultado — ${nome}</h2>
+          <h2 style="color:#fff;font-size:18px;margin:0 0 4px">Resultado — ${nome || cpf}</h2>
           <table>
             <tr><th>Banco</th><th>Status</th><th>Taxa</th><th>Parcela</th><th>CET</th><th>Mensagem</th></tr>
             ${linhas}
