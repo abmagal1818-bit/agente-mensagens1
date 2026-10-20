@@ -3167,6 +3167,7 @@ app.get("/painel", async (req, res) => {
       '<a href="/painel" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">📋 Pipeline</a>' +
       '<a href="/painel/lista" style="color:#888;font-size:12px;text-decoration:none">💬 Conversas</a>' +
       '<a href="/followups" style="color:#888;font-size:12px;text-decoration:none">📅 Follow-ups</a>' +
+      '<a href="/painel/simulacao-manual" style="color:#888;font-size:12px;text-decoration:none">💳 Simulações</a>' +
       (alertasPendentesCount > 0 ? '<a href="/painel/alertas" style="color:#f44336;font-size:12px;font-weight:600;text-decoration:none">⚠️ Alertas (' + alertasPendentesCount + ')</a>' : '') +
       '<button onclick="document.getElementById(\'form-novo-contato\').style.display=document.getElementById(\'form-novo-contato\').style.display===\'none\'?\'flex\':\'none\'" style="margin-left:auto;background:#f0a500;color:#000;border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer">➕ Novo contato</button>' +
       '</div>' +
@@ -3435,7 +3436,8 @@ app.get("/painel/lista", async (req, res) => {
       '.tabs{padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px}</style></head><body>' +
       '<header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>' +
       '<div class="tabs"><a href="/painel" style="color:#888;font-size:12px;text-decoration:none">📋 Pipeline</a>' +
-      '<a href="/painel/lista" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">💬 Conversas</a></div>' +
+      '<a href="/painel/lista" style="color:#f0a500;font-size:12px;font-weight:600;text-decoration:none">💬 Conversas</a>' +
+      '<a href="/painel/simulacao-manual" style="color:#888;font-size:12px;text-decoration:none">💳 Simulações</a></div>' +
       (itens || '<p style="padding:20px;color:#555">Nenhuma conversa</p>') +
       '</body></html>';
 
@@ -3873,38 +3875,62 @@ app.post("/painel/resolver", async (req, res) => {
 // ─────────────────────────────────────────────
 // Formulário simples para o Augusto disparar uma simulação manualmente,
 // sem precisar passar pelo fluxo da Sara no WhatsApp.
+// Barra de abas padrão do CRM, repetida aqui pra página ficar integrada ao
+// resto do painel (mesmo visual, mesma navegação) em vez de parecer um site solto.
+function tabsCrm(ativa) {
+  const itens = [
+    { href: "/painel", label: "📋 Pipeline" },
+    { href: "/painel/lista", label: "💬 Conversas" },
+    { href: "/followups", label: "📅 Follow-ups" },
+    { href: "/painel/simulacao-manual", label: "💳 Simulações" }
+  ];
+  return '<div style="padding:10px 16px;background:#0f0f0f;border-bottom:1px solid #1a1a1a;display:flex;gap:10px;align-items:center">' +
+    itens.map(i => `<a href="${i.href}" style="color:${i.href === ativa ? '#f0a500' : '#888'};font-size:12px;font-weight:${i.href === ativa ? '600' : '400'};text-decoration:none">${i.label}</a>`).join('') +
+    '</div>';
+}
+
 app.get("/painel/simulacao-manual", (req, res) => {
   res.send(`
-    <html>
+    <!DOCTYPE html>
+    <html lang="pt-BR">
     <head>
       <meta charset="utf-8">
-      <title>Simulação Multi-Banco — Premium Automarcas</title>
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Simulações — Sarah CRM</title>
       <style>
-        body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
-        h2 { margin-bottom: 4px; }
-        label { display: block; margin-top: 14px; font-weight: bold; font-size: 14px; }
-        input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; font-size: 14px; }
-        button { margin-top: 20px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
+        body { margin:0; font-family:-apple-system,sans-serif; background:#0a0a0a; color:#e0e0e0; }
+        a { color:inherit; }
+        header { background:#111; border-bottom:1px solid #222; padding:12px 16px; display:flex; align-items:center; gap:10px; }
+        .conteudo { max-width:480px; margin:0 auto; padding:20px 16px; }
+        h2 { margin:0 0 4px; color:#fff; font-size:18px; }
+        label { display:block; margin-top:14px; font-weight:600; font-size:13px; color:#ccc; }
+        input { width:100%; padding:9px; margin-top:4px; box-sizing:border-box; font-size:14px; background:#161616; border:1px solid #2a2a2a; border-radius:6px; color:#e0e0e0; }
+        input:focus { outline:none; border-color:#f0a500; }
+        button { margin-top:20px; padding:10px 18px; font-size:14px; font-weight:700; cursor:pointer; background:#f0a500; color:#000; border:none; border-radius:6px; }
       </style>
     </head>
     <body>
-      <h2>Simulação Multi-Banco</h2>
-      <p style="color:#666;font-size:13px;">Preenche os dados e roda a simulação nos bancos configurados (Pan, Santander, Itaú).</p>
-      <form method="POST" action="/painel/simulacao-manual">
-        <label>Nome completo</label>
-        <input name="nome" required>
-        <label>CPF</label>
-        <input name="cpf" required>
-        <label>Data de nascimento</label>
-        <input name="nascimento" placeholder="dd/mm/aaaa">
-        <label>Valor do veículo (R$)</label>
-        <input name="veiculoValor" type="number" step="0.01">
-        <label>Valor de entrada (R$)</label>
-        <input name="entrada" type="number" step="0.01">
-        <label>Prazo (meses)</label>
-        <input name="prazoMeses" type="number">
-        <button type="submit">Rodar simulação</button>
-      </form>
+      <header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>
+      ${tabsCrm("/painel/simulacao-manual")}
+      <div class="conteudo">
+        <h2>💳 Simulação Multi-Banco</h2>
+        <p style="color:#888;font-size:13px;">Preenche os dados e roda a simulação nos bancos configurados (Pan, Santander, Itaú).</p>
+        <form method="POST" action="/painel/simulacao-manual">
+          <label>Nome completo</label>
+          <input name="nome" required>
+          <label>CPF</label>
+          <input name="cpf" required>
+          <label>Data de nascimento</label>
+          <input name="nascimento" placeholder="dd/mm/aaaa">
+          <label>Valor do veículo (R$)</label>
+          <input name="veiculoValor" type="number" step="0.01">
+          <label>Valor de entrada (R$)</label>
+          <input name="entrada" type="number" step="0.01">
+          <label>Prazo (meses)</label>
+          <input name="prazoMeses" type="number">
+          <button type="submit">Rodar simulação</button>
+        </form>
+      </div>
     </body>
     </html>
   `);
@@ -3920,30 +3946,44 @@ app.post("/painel/simulacao-manual", async (req, res) => {
       prazoMeses: prazoMeses ? parseInt(prazoMeses) : null
     }, null, null);
 
+    const corStatus = (s) => s === "aprovado" ? "#4caf50" : s === "negado" ? "#f44336" : s === "nao_configurado" ? "#666" : "#f0a500";
     const linhas = resultados.map(r => `
       <tr>
-        <td style="padding:8px;border:1px solid #ddd;">${r.banco}</td>
-        <td style="padding:8px;border:1px solid #ddd;">${r.status}</td>
-        <td style="padding:8px;border:1px solid #ddd;">${r.taxa ?? "-"}</td>
-        <td style="padding:8px;border:1px solid #ddd;">${r.parcela ?? "-"}</td>
-        <td style="padding:8px;border:1px solid #ddd;">${r.cet ?? "-"}</td>
-        <td style="padding:8px;border:1px solid #ddd;">${r.mensagem ?? "-"}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a;color:#fff;font-weight:600">${r.banco}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a;color:${corStatus(r.status)}">${r.status}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a">${r.taxa ?? "-"}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a">${r.parcela ?? "-"}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a">${r.cet ?? "-"}</td>
+        <td style="padding:10px;border-bottom:1px solid #1a1a1a;color:#888;font-size:12px">${r.mensagem ?? "-"}</td>
       </tr>`).join("");
 
     res.send(`
-      <html>
-      <head><meta charset="utf-8"><title>Resultado — Simulação Multi-Banco</title>
-      <style>body{font-family:Arial,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;}
-      table{border-collapse:collapse;width:100%;margin-top:16px;}
-      th{padding:8px;border:1px solid #ddd;background:#f3f3f3;text-align:left;}</style>
+      <!DOCTYPE html>
+      <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Resultado — Sarah CRM</title>
+        <style>
+          body { margin:0; font-family:-apple-system,sans-serif; background:#0a0a0a; color:#e0e0e0; }
+          a { color:inherit; }
+          header { background:#111; border-bottom:1px solid #222; padding:12px 16px; display:flex; align-items:center; gap:10px; }
+          .conteudo { max-width:720px; margin:0 auto; padding:20px 16px; }
+          table { border-collapse:collapse; width:100%; margin-top:16px; font-size:13px; }
+          th { padding:10px; text-align:left; color:#888; font-weight:600; border-bottom:1px solid #2a2a2a; }
+        </style>
       </head>
       <body>
-        <h2>Resultado da simulação — ${nome}</h2>
-        <table>
-          <tr><th>Banco</th><th>Status</th><th>Taxa</th><th>Parcela</th><th>CET</th><th>Mensagem</th></tr>
-          ${linhas}
-        </table>
-        <p style="margin-top:20px;"><a href="/painel/simulacao-manual">← Nova simulação</a></p>
+        <header><h1 style="font-size:16px;color:#fff;font-weight:700;margin:0">Sarah <span style="color:#f0a500">CRM</span></h1></header>
+        ${tabsCrm("/painel/simulacao-manual")}
+        <div class="conteudo">
+          <h2 style="color:#fff;font-size:18px;margin:0 0 4px">Resultado — ${nome}</h2>
+          <table>
+            <tr><th>Banco</th><th>Status</th><th>Taxa</th><th>Parcela</th><th>CET</th><th>Mensagem</th></tr>
+            ${linhas}
+          </table>
+          <p style="margin-top:20px;"><a href="/painel/simulacao-manual" style="color:#f0a500;text-decoration:none;font-size:13px">← Nova simulação</a></p>
+        </div>
       </body>
       </html>
     `);
