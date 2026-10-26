@@ -1755,6 +1755,16 @@ function extrairPalavrasRelevantes(texto) {
     .filter(p => p.length >= 3 && !/^\d+([.,]\d+)?$/.test(p) && !STOPWORDS_VEICULO.has(p));
 }
 
+// Checa se `palavra` aparece no texto como PALAVRA INTEIRA (respeitando \b), nunca como
+// substring de outra palavra. Adicionado 2026-10-26: antes disso, o match usava
+// texto.includes(palavra), e isso fez o sistema confundir "crossfox" (carro antigo que a
+// cliente estava trocando/vendendo) com o "Fox" do estoque, trocando o veiculo_interesse no
+// meio de uma negociação que era sobre a Meriva (caso Vilma Gialdi, 5567996050485, 2026-10-26).
+function contemPalavraInteira(texto, palavra) {
+  const escapada = String(palavra).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escapada}\\b`, "i").test(texto);
+}
+
 function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   const mensagensRecentes = [
     { role: "user", content: texto },
@@ -1768,12 +1778,12 @@ function encontrarVeiculoNoContexto(texto, historicoConversa, estoque) {
   function pontuarVeiculo(v, textoAlvo) {
     const palavrasFortes = extrairPalavrasRelevantes(`${v.marca || ""} ${v.modeloBase || v.modelo || ""}`);
     if (!palavrasFortes.length) return 0;
-    const acertosFortes = palavrasFortes.filter(p => textoAlvo.includes(p)).length;
+    const acertosFortes = palavrasFortes.filter(p => contemPalavraInteira(textoAlvo, p)).length;
     if (acertosFortes === 0) return 0;
     const palavrasFracas = extrairPalavrasRelevantes(v.versaoTexto || "");
-    const acertosFracos = palavrasFracas.filter(p => textoAlvo.includes(p)).length;
+    const acertosFracos = palavrasFracas.filter(p => contemPalavraInteira(textoAlvo, p)).length;
     let score = acertosFortes * 2 + acertosFracos;
-    if (v.ano && textoAlvo.includes(String(v.ano))) score += 1;
+    if (v.ano && contemPalavraInteira(textoAlvo, String(v.ano))) score += 1;
     return score;
   }
 
@@ -1804,7 +1814,7 @@ function contarVeiculosAmbiguos(texto, estoque) {
   function pontuar(v) {
     const palavrasFortes = extrairPalavrasRelevantes(`${v.marca || ""} ${v.modeloBase || v.modelo || ""}`);
     if (!palavrasFortes.length) return 0;
-    return palavrasFortes.filter(p => t.includes(p)).length;
+    return palavrasFortes.filter(p => contemPalavraInteira(t, p)).length;
   }
   const candidatos = estoque.filter(v => pontuar(v) >= 1);
   return candidatos;
