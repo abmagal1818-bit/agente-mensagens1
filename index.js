@@ -311,9 +311,15 @@ function ehMensagemSimples(texto) {
 function limparRespostaIA(texto) {
   return String(texto)
     .replace(/\[SOLICITAR_FOTOS:[^\]]*\]/gi, "")
-    .replace(/\[Sistema:[^\]]*\]/gi, "")
+    .replace(/\[Sistema\b[^\]]*\]/gi, "")
     .replace(/\[instrução:[^\]]*\]/gi, "")
     .replace(/\[instruction:[^\]]*\]/gi, "")
+    // Rede de seguranca adicionada 2026-10-28: a IA ocasionalmente ecoa de volta pro
+    // cliente um marcador cru do tipo "[fotos enviadas]" (sem o prefixo "Sistema:"),
+    // em vez de so usar essa informacao internamente. Isso vazou pro cliente real
+    // (caso 5551996050893-like, monitor de 2026-10-28) junto com a afirmacao de que
+    // as fotos foram enviadas sem elas terem sido enviadas de fato nessa mensagem.
+    .replace(/\[\s*fotos?\s+enviad[ao]s?[^\]]*\]/gi, "")
     .replace(/^#{1,6}\s.*$/gm, "")
     .replace(/\*\*(.+?)\*\*/g, "*$1*")
     .trim();
@@ -1702,6 +1708,23 @@ async function analisarImagem(mediaId, caption, from) {
   }
 }
 
+// Detecta quando o cliente esta dizendo que NAO recebeu as fotos (reclamacao), nao
+// apenas pedindo fotos pela primeira vez. Adicionado 2026-10-28: sem isso, quando o
+// cliente reclamava ("nao recebi", "cade as fotos") depois de uma tentativa de envio,
+// o fluxo deterministico podia nao disparar de novo (por causa do jaEnviouFotos) e a
+// conversa caia no caminho da IA generativa, que por vezes insistia "ja mandei as
+// fotos" (ou ate vazava um marcador interno tipo "[fotos enviadas]") em vez de
+// reenviar de fato. Essa reclamacao agora forca uma nova tentativa real de envio,
+// mesmo que o sistema acredite que ja enviou antes.
+function clienteReclamouFotosNaoRecebidas(texto) {
+  const t = (texto || "").toLowerCase();
+  if (!t.includes("foto")) return false;
+  if (t.includes("cadê") || t.includes("cade")) return true;
+  if (/n[ãa]o\s+(recebi|chegou|chegaram|vi|apareceu|apareceram)/.test(t)) return true;
+  if (/nenhuma\s+fotos?\s+chegou/.test(t)) return true;
+  return false;
+}
+
 function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
@@ -2615,8 +2638,9 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
 
   const ehTextoNormal = !text.startsWith("[Cliente enviou") && !text.startsWith("[Áudio]") && !text.startsWith("[Sistema:");
   const jaEnviouFotos = conversas[from].slice(-6).map(m => m.content || "").join(" ").includes("[Sistema: fotos enviadas");
-  const resultadoFotos = ehTextoNormal && clienteEstaPedindoFotosDoEstoque(text, conversas[from]);
-  const clientePedindoFotos = resultadoFotos && (!jaEnviouFotos || resultadoFotos === "adicional");
+  const reclamouFotosNaoRecebidas = ehTextoNormal && clienteReclamouFotosNaoRecebidas(text);
+  const resultadoFotos = ehTextoNormal && (clienteEstaPedindoFotosDoEstoque(text, conversas[from]) || reclamouFotosNaoRecebidas);
+  const clientePedindoFotos = resultadoFotos && (!jaEnviouFotos || resultadoFotos === "adicional" || reclamouFotosNaoRecebidas);
   if (clientePedindoFotos) {
     const veiculo = encontrarVeiculoNoContexto(text, conversas[from], estoqueAtual);
     let msgFotos;
