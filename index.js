@@ -283,14 +283,23 @@ function limparTexto(str) {
 
 function clienteEstaEmFluxoTroca(historicoConversa) {
   const mensagensRecentes = (historicoConversa || []).slice(-10);
-  const historico = mensagensRecentes.map(m => m.content || "").join(" ").toLowerCase();
+  // Correcao 2026-10-29: antes disso, "historico" juntava mensagens do CLIENTE e da
+  // SARA indiscriminadamente antes de checar frasesCliente. Isso fazia a propria Sara
+  // disparar um falso-positivo de "fluxo de troca" ao dizer algo como "Vou mandar as
+  // fotos pra você!" (oferecendo fotos do ESTOQUE), porque a frase "mandar as fotos"
+  // batia com a lista pensada pra detectar o CLIENTE oferecendo fotos do carro dele na
+  // troca. Com o fluxo de troca "ligado" por engano, clienteEstaPedindoFotosDoEstoque
+  // passava a sempre devolver false pros proximos pedidos de foto daquele cliente,
+  // jogando o pedido pro caminho da IA generativa (que podia so afirmar "as fotos ja
+  // foram enviadas" sem reenviar de fato — caso Paulo Boaventura, 5551989608248).
+  const mensagensCliente = mensagensRecentes.filter(m => m.role === "user").map(m => (m.content || "").toLowerCase()).join(" ");
   const frasesCliente = [
     "tenho um", "tenho uma", "meu carro", "na troca", "pra troca", "de troca",
     "dar na troca", "dou na troca", "mandar umas fotos", "manda umas fotos",
     "mandar as fotos", "vou mandar fotos", "tirar umas fotos", "tiro umas fotos",
     "tirar as fotos", "que tinha troca", "falei que tinha troca"
   ];
-  if (frasesCliente.some(f => historico.includes(f))) return true;
+  if (frasesCliente.some(f => mensagensCliente.includes(f))) return true;
   const frasesSara = [
     "avaliacao certinha", "fazer uma avaliacao", "avaliar direitinho", "qual a versao",
     "quantos km ela", "km ela ta rodando", "km ela esta rodando", "documentacao em dia",
