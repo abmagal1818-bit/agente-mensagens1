@@ -293,8 +293,13 @@ function clienteEstaEmFluxoTroca(historicoConversa) {
   // jogando o pedido pro caminho da IA generativa (que podia so afirmar "as fotos ja
   // foram enviadas" sem reenviar de fato — caso Paulo Boaventura, 5551989608248).
   const mensagensCliente = mensagensRecentes.filter(m => m.role === "user").map(m => (m.content || "").toLowerCase()).join(" ");
+  // Correcao 2026-11-02: "tenho um"/"tenho uma" removidos daqui por serem genericos
+  // demais - batiam com frases sem nenhuma relacao com troca de veiculo, tipo "tenho um
+  // credito aprovado" (cliente vindo de anuncio do Mercado Livre, caso telefone
+  // 5554992093244, Jetta Variant). Casos legitimos de troca continuam cobertos pelas
+  // frases mais especificas abaixo ("na troca", "pra troca", "dar na troca" etc.).
   const frasesCliente = [
-    "tenho um", "tenho uma", "meu carro", "na troca", "pra troca", "de troca",
+    "meu carro", "na troca", "pra troca", "de troca",
     "dar na troca", "dou na troca", "mandar umas fotos", "manda umas fotos",
     "mandar as fotos", "vou mandar fotos", "tirar umas fotos", "tiro umas fotos",
     "tirar as fotos", "que tinha troca", "falei que tinha troca"
@@ -1738,9 +1743,19 @@ function clienteEstaPedindoFotosDoEstoque(texto, historicoConversa) {
   const t = texto.toLowerCase().trim();
   if (clienteEstaEmFluxoTroca(historicoConversa)) return false;
   const ultimaResposta = (historicoConversa || []).filter(m => m.role === "assistant").slice(-1)[0]?.content || "";
+  const ultimaRespostaLower = ultimaResposta.toLowerCase();
   const confirmacoesSimples = ["sim", "quero", "pode", "manda", "claro", "ok", "vai", "manda sim", "quero sim"];
   const ehConfirmacaoCurta = t.length <= 30 && confirmacoesSimples.some(p => t === p || t.includes(p));
-  if (ehConfirmacaoCurta && ultimaResposta.toLowerCase().includes("foto")) return true;
+  // Correcao 2026-11-02: antes disso, uma confirmacao curta tipo "Sim" apos QUALQUER
+  // mensagem da Sara contendo "foto" disparava envio de fotos do ESTOQUE - mesmo quando a
+  // Sara tinha acabado de PEDIR fotos do carro do CLIENTE pra avaliacao de troca (caso
+  // Paulo Boaventura Reis, 5551993921038: Sara pediu "consegue me mandar umas fotos?" do
+  // Ka de troca, cliente respondeu "Sim", e o sistema mandou fotos do Toyota Etios do
+  // estoque por engano). Agora so dispara se a ultima resposta da Sara NAO for um pedido
+  // de fotos AO cliente.
+  const saraPediuFotoDoCliente = /me\s+mandar?\b[\s\S]{0,25}?fotos?/i.test(ultimaRespostaLower) ||
+    /consegue\s+me\s+mandar/i.test(ultimaRespostaLower);
+  if (ehConfirmacaoCurta && ultimaRespostaLower.includes("foto") && !saraPediuFotoDoCliente) return true;
   const naoEPedido = ["te mando", "vou mandar", "vou te mandar", "ja mando", "já mando", "mando agora", "mandando foto", "vou enviar", "to mandando", "tô mandando"];
   if (naoEPedido.some(p => t.includes(p))) return false;
   const ePedido = [
@@ -2438,8 +2453,15 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
     if (estado.etapa === "nome") {
       const nomeDigitado = text.trim();
       const palavrasNaoNome = ["entrada", "parcela", "financi", "desconto", "preço", "preco", "valor", "restante", "seria", "quero", "queria", "gostaria", "consegue", "consigo", "aguardo", "aguardando", "imagens", "espero", "esperando", "então", "entao", "beleza", "obrigado", "obrigada", "posso", "preciso", "foto", "fotos"];
+      // Correcao 2026-11-02: palavras de frase/dia da semana que indicam que o cliente
+      // mandou uma frase e nao um nome (caso telefone 51993***038: "Sábado vou ir aí na
+      // loja" foi aceito como nome completo porque nao batia com nenhum termo da lista
+      // acima). Checadas por palavra inteira pra nao confundir com substrings dentro de
+      // nomes reais (ex: "ir" dentro de "Oliveira").
+      const palavrasNaoNomeInteiras = ["vou", "vai", "vamos", "ir", "irei", "aí", "ai", "lá", "la", "loja", "chegar", "chego", "passar", "estar", "hoje", "amanhã", "amanha", "depois", "agora", "sábado", "sabado", "domingo", "segunda", "terça", "terca", "quarta", "quinta", "sexta"];
       const temDigito = /\d/.test(nomeDigitado);
-      const contemPalavraNaoNome = palavrasNaoNome.some(p => nomeDigitado.toLowerCase().includes(p));
+      const contemPalavraNaoNome = palavrasNaoNome.some(p => nomeDigitado.toLowerCase().includes(p))
+        || palavrasNaoNomeInteiras.some(p => contemPalavraInteira(nomeDigitado, p));
       const parecePergunta = text.includes("?") || text.toLowerCase().startsWith("qual") || text.toLowerCase().startsWith("como") || text.toLowerCase().startsWith("quando") || text.toLowerCase().startsWith("quanto") || text.toLowerCase().startsWith("onde") || text.toLowerCase().startsWith("tem") || text.toLowerCase().startsWith("voc") || temDigito || contemPalavraNaoNome;
       if (nomeDigitado.split(/\s+/).length >= 2 && nomeDigitado.length >= 5 && !parecePergunta) {
         estado.nome = nomeDigitado;
