@@ -1044,14 +1044,21 @@ async function detectarEstagio(from, text, historico, ehRetry = false) {
       await notificarMudancaEstagioAutomatica(from, "perdido", fraseComprouEmOutroLugar.find(f => t.includes(f)));
       return;
     }
-    const gatilhoFechou = fraseComprouAqui.find(f => t.includes(f) && !temNegacaoAntes(t, f));
+    // Reforço (06/11): uma pergunta ("posso fechar?", "topa fechar por X?") não é uma
+    // confirmação real de venda — só conta como "vendido" uma afirmação, não uma pergunta.
+    const gatilhoFechou = !t.includes("?") && fraseComprouAqui.find(f => t.includes(f) && !temNegacaoAntes(t, f));
     if (gatilhoFechou) {
       await atualizarEstagio(from, "vendido");
       await notificarMudancaEstagioAutomatica(from, "vendido", gatilhoFechou);
       return;
     }
   }
-  if (t.includes("vou aí") || t.includes("vou até") || t.includes("passo aí") || t.includes("apareço") || t.includes("vou na loja") || t.includes("vou ir") || t.includes("vou visitar") || t.includes("amanhã às") || t.includes("amanha as") || t.includes("pode ser às") || t.includes("pode ser as")) {
+  const frasesVisitaConfirmada = ["vou aí", "vou até", "passo aí", "apareço", "vou na loja", "vou ir", "vou visitar", "amanhã às", "amanha as", "pode ser às", "pode ser as"];
+  const termoVisitaEncontrado = frasesVisitaConfirmada.find(f => t.includes(f));
+  // Reforço (06/11): regex/checagem mais rígida — não basta conter a frase; não pode haver
+  // negação antes ("não vou aí hoje") nem incerteza ("talvez", "se der", "quem sabe", "não sei se").
+  const temIncertezaVisita = /\b(talvez|quem sabe|se der|se puder|se conseguir|não sei se|nao sei se)\b/.test(t);
+  if (termoVisitaEncontrado && !temNegacaoAntes(t, termoVisitaEncontrado) && !temIncertezaVisita) {
     const { data: clienteAtual } = await supabase.from("clientes").select("estagio").eq("telefone", from).limit(1);
     const jaEraVisita = clienteAtual?.[0]?.estagio === "visita_agendada";
     await atualizarEstagio(from, "visita_agendada");
@@ -1121,6 +1128,11 @@ async function buscarAprendizados() {
 
 async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar, nivel = 1) {
   try {
+    const { data: clienteOptOut } = await supabase.from("clientes").select("opt_out_reativacao").eq("telefone", telefone).limit(1);
+    if (clienteOptOut?.[0]?.opt_out_reativacao) {
+      console.log(`[FollowUp] Não agendado (cliente em opt-out): ${telefone} — ${motivo}`);
+      return;
+    }
     const agendadoPara = new Date();
     agendadoPara.setDate(agendadoPara.getDate() + diasAguardar);
     await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false).eq("motivo", motivo);
@@ -1135,6 +1147,11 @@ async function agendarFollowUp(telefone, motivo, veiculoInteresse, diasAguardar,
 
 async function agendarFollowUpHoras(telefone, motivo, veiculoInteresse, horasAguardar) {
   try {
+    const { data: clienteOptOutHoras } = await supabase.from("clientes").select("opt_out_reativacao").eq("telefone", telefone).limit(1);
+    if (clienteOptOutHoras?.[0]?.opt_out_reativacao) {
+      console.log(`[FollowUp] Não agendado (cliente em opt-out): ${telefone} — ${motivo}`);
+      return;
+    }
     const agendadoPara = new Date();
     agendadoPara.setHours(agendadoPara.getHours() + horasAguardar);
     await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false).eq("motivo", motivo);
@@ -1213,6 +1230,66 @@ const TEMPLATE_FOLLOWUP = process.env.TEMPLATE_FOLLOWUP_NAME || "followup_generi
 
 const DIAS_PROXIMO_NIVEL = { 1: 2, 2: 3 };
 const NIVEL_MAXIMO_REATIVACAO = 3;
+
+// --- Reaplicação de correções anteriores (06/11) ---------------------------------------
+
+// Janela em que a Sara fica em modo silencioso depois de um consultor intervir manualmente
+// numa conversa (via /painel/enviar, /painel/template ou /painel/intervencao), pra evitar
+// que a resposta automática contradiga ou atropele o que o humano já disse.
+const JANELA_INTERVENCAO_MANUAL_MS = 3 * 60 * 60 * 1000; // 3 horas
+
+// Marca no Supabase (coluna `clientes.intervencao_manual_em`, timestamptz) o momento em que
+// um consultor humano respondeu manualmente a esse cliente. Se a coluna ainda não existir,
+// falha silenciosamente (mesmo padrão defensivo usado no resto do arquivo) sem travar o envio.
+async function marcarIntervencaoManual(telefone) {
+  try {
+    await supabase.from("clientes").upsert({ telefone, intervencao_manual_em: new Date().toISOString() }, { onConflict: "telefone" });
+  } catch (e) { console.error("[IntervençãoManual] Erro ao marcar flag (coluna intervencao_manual_em existe na tabela clientes?):", e.message); }
+}
+
+// Bug: a Sara insistia em qualificar/vender pra contatos que avisaram ser número errado/engano.
+function clienteIndicouNumeroErrado(texto) {
+  const t = (texto || "").toLowerCase();
+  const padroes = ["numero errado", "número errado", "num errado", "errei o numero", "errei o número",
+    "discagem errada", "quem é você", "quem e voce", "quem fala", "não te conheço", "nao te conheco",
+    "não conheço vocês", "nao conheco voces", "mensagem errada", "pessoa errada", "contato errado"];
+  return padroes.some(p => t.includes(p));
+}
+
+// Bug: a régua de reativação (follow-ups automáticos de "sumiu") não tinha opt-out — o
+// cliente não tinha como pedir pra parar de receber esses contatos automáticos.
+function clienteSolicitouOptOutReativacao(texto) {
+  const t = (texto || "").toLowerCase();
+  const padroes = ["não quero mais receber", "nao quero mais receber", "pare de mandar", "pare de enviar",
+    "para de mandar", "para de enviar", "para de me mandar", "me tira da lista", "me tire da lista",
+    "não me manda mais", "nao me manda mais", "remove meu numero", "remova meu número",
+    "cancelar inscrição", "cancelar inscricao", "não manda mais mensagem", "nao manda mais mensagem"];
+  return padroes.some(p => t.includes(p));
+}
+
+// Persiste o opt-out (coluna `clientes.opt_out_reativacao`, boolean) e cancela qualquer
+// follow-up automático já agendado pra esse telefone.
+async function registrarOptOutReativacao(telefone) {
+  try {
+    await supabase.from("clientes").upsert({ telefone, opt_out_reativacao: true }, { onConflict: "telefone" });
+    await supabase.from("followups").update({ enviado: true }).eq("telefone", telefone).eq("enviado", false);
+    console.log(`[OptOut] ${telefone} removido da régua de reativação`);
+  } catch (e) { console.error("[OptOut] Erro ao registrar opt-out (coluna opt_out_reativacao existe na tabela clientes?):", e.message); }
+}
+
+// Bug: quando o cliente recusava explicitamente passar CPF/dados pra simulação de crédito,
+// a Sara continuava insistindo em pedir o documento de novo, em loop.
+function clienteRecusouDadosFinanceiros(texto) {
+  const t = (texto || "").toLowerCase();
+  const padroes = ["não quero dar", "nao quero dar", "não vou passar", "nao vou passar",
+    "prefiro não passar", "prefiro nao passar", "não vou informar", "nao vou informar",
+    "não quero informar", "nao quero informar", "não vou fornecer", "nao vou fornecer",
+    "não confio", "nao confio", "não me sinto confortável", "nao me sinto confortavel",
+    "não vou dar meus dados", "nao vou dar meus dados", "prefiro não dar", "prefiro nao dar",
+    "não quero passar meus dados", "nao quero passar meus dados", "sem meus dados"];
+  return padroes.some(p => t.includes(p));
+}
+
 
 async function enviarMensagemTemplate(telefone, nomeTemplate, parametros = []) {
   try {
@@ -1317,6 +1394,23 @@ async function processarFollowUpsPendentes() {
         await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
         console.log(`[FollowUp] Cancelado (veiculo vendido/saiu do estoque): ${followup.telefone} — ${followup.veiculo_interesse}`);
         notificarFollowUpVeiculoVendido(followup.telefone, followup.veiculo_interesse).catch(() => {});
+        continue;
+      }
+
+      // Revalidação geral de estágio (cobre todos os motivos de follow-up, não só
+      // "visita_nao_confirmada" e "sumiu" como antes): não envia se o cliente já respondeu
+      // depois de agendado, já saiu do funil (vendido/perdido), pediu opt-out da régua de
+      // reativação, ou está sob intervenção manual recente de um consultor humano.
+      const { data: clienteRevalidacao } = await supabase.from("clientes").select("estagio, ultima_mensagem_cliente, opt_out_reativacao, intervencao_manual_em").eq("telefone", followup.telefone).limit(1);
+      const cliRevalidacao = clienteRevalidacao?.[0];
+      const respondeuDepoisGeral = cliRevalidacao?.ultima_mensagem_cliente && followup.criado_em &&
+        new Date(cliRevalidacao.ultima_mensagem_cliente).getTime() > new Date(followup.criado_em).getTime();
+      const estagiosQueCancelamFollowUp = ["vendido", "perdido"];
+      const emIntervencaoManualRecente = cliRevalidacao?.intervencao_manual_em &&
+        (Date.now() - new Date(cliRevalidacao.intervencao_manual_em).getTime()) < JANELA_INTERVENCAO_MANUAL_MS;
+      if (respondeuDepoisGeral || estagiosQueCancelamFollowUp.includes(cliRevalidacao?.estagio) || cliRevalidacao?.opt_out_reativacao || emIntervencaoManualRecente) {
+        await supabase.from("followups").update({ enviado: true }).eq("id", followup.id);
+        console.log(`[FollowUp] Cancelado (revalidação geral de estágio - motivo ${followup.motivo}): ${followup.telefone}`);
         continue;
       }
 
@@ -1698,7 +1792,7 @@ async function analisarImagem(mediaId, caption, from) {
     const res = await axios.post("https://api.anthropic.com/v1/messages",
       { model: "claude-haiku-4-5", max_tokens: 200, messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: mediaRes.data.mime_type || "image/jpeg", data: base64Image } },
-        { type: "text", text: `Avaliador de veículos. Descreva em 2 linhas: estado geral, pontos positivos e de atenção. ${caption ? `Contexto: ${caption}` : ""}` }
+        { type: "text", text: `Avaliador de veículos. Com base SOMENTE nesta foto, descreva em até 2 linhas uma IMPRESSÃO PRELIMINAR (não um laudo confirmado): estado geral aparente, pontos positivos e pontos de atenção. Use linguagem de possibilidade ("parece", "pode ser", "aparenta", "dá pra notar algo que pode ser") e NUNCA afirme categoricamente um defeito, dano ou estado do veículo como fato — a palavra final é sempre do consultor humano, presencialmente. ${caption ? `Contexto: ${caption}` : ""}` }
       ]}] },
       { headers: { "x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
@@ -1947,6 +2041,47 @@ function formatarEstoque(modeloFiltro = null) {
   ).join("\n");
 }
 
+// Bug (06/11): a Sara prometia "vou te avisar quando chegar [X]" sem nenhuma fonte real de
+// dados sobre reposição de estoque/pedidos futuros (não existe tabela pra isso no Supabase).
+// Trava de código, além da instrução de prompt: se a resposta sair com essa promessa mesmo
+// assim, ela é substituída por uma resposta honesta (sem previsão confirmada).
+function bloquearPromessaEstoqueFuturo(reply) {
+  const padroesProibidos = [
+    /vou\s+(te\s+)?avisar\s+quando\s+(chegar|tiver|houver)/i,
+    /te\s+avis[oa]\s+quando\s+chegar/i,
+    /vou\s+verificar\s+(a\s+)?disponibilidade\s+futura/i,
+    /assim\s+que\s+chegar.{0,20}aviso/i,
+    /avis[oa]\s+quando\s+tivermos/i
+  ];
+  if (padroesProibidos.some(p => p.test(reply))) {
+    return "Não tenho uma previsão de chegada confirmada disso no estoque no momento. Posso anotar seu interesse pro nosso consultor te avisar se algo compatível aparecer, mas sem garantir prazo — quer que eu faça isso? 😊";
+  }
+  return reply;
+}
+
+function extrairKmDoTexto(texto) {
+  const t = (texto || "").toLowerCase();
+  let m = t.match(/(\d{2,3})\s*mil\s*km/);
+  if (m) return parseInt(m[1], 10) * 1000;
+  m = t.match(/(\d{1,3}(?:\.\d{3})+)\s*km/);
+  if (m) return parseInt(m[1].replace(/\./g, ""), 10);
+  m = t.match(/(\d{4,6})\s*km/);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+// Bug (06/11): num caso real, a Sara se corrigiu de uma análise de foto errada chamando o
+// carro de "zerado" — mesmo ele tendo 110 mil km. Trava de código: se a resposta final usa
+// "zerado" e o histórico recente menciona uma quilometragem alta, troca por linguagem neutra.
+function bloquearAdjetivoZeradoComKmAlto(reply, historicoTexto) {
+  if (!/\bzerad[oa]\b/i.test(reply)) return reply;
+  const km = extrairKmDoTexto(historicoTexto);
+  if (km !== null && km > 20000) {
+    return reply.replace(/\bzerad[oa]\b/gi, "em bom estado");
+  }
+  return reply;
+}
+
 const SYSTEM_PROMPT = (fipeInfo, aprendizadosExtra = "", carroNaoDisponivel = null, descontoPendenteAtivo = false, veiculosAmbiguos = null, modeloMencionado = null, versaoIncerta = null, veiculoAtual = null) => {
   const agora = new Date();
   const dataHoraAtual = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -2014,15 +2149,22 @@ ${formatarEstoque(veiculoAtual ? limparTexto(veiculoAtual.modelo || "") : modelo
 - Referência: até ~12.000-15.000 km/ano é uso normal a baixo. Acima disso é uso mais intenso. Exemplo: um carro de 2008 com 134.000 km rodou em média ~7.400 km/ano — isso é BAIXO pra idade do carro, não alto.
 - Se o cliente reclamar que a quilometragem de algum veículo está alta, faça essa conta (km ÷ idade do carro) antes de responder. Se a média for baixa ou normal pra idade do carro, explique isso educadamente ao cliente em vez de simplesmente concordar com a reclamação e emendar outras opções.
 
+🚨 REGRA CRÍTICA — ANÁLISE AUTOMÁTICA DE FOTOS NÃO É LAUDO (não é fato confirmado):
+- Quando o sistema informar uma "análise"/observação automática de uma foto enviada pelo cliente (visão computacional), isso é SEMPRE uma impressão preliminar, nunca um fato confirmado.
+- NUNCA afirme categoricamente ao cliente que o carro dele (ou o de troca) tem um defeito, amassado, risco, problema, ou está em determinado estado só com base nessa análise automática.
+- Se for relevante comentar algo da análise, use linguagem de possibilidade ("pode ser", "parece", "notei algo que pode ser...") e diga que o consultor vai confirmar presencialmente — nunca apresente como certeza.
+- NUNCA use adjetivos absolutos como "zerado", "impecável" ou "perfeito" para o carro do cliente ou de troca com base em foto — e NUNCA chame um veículo de "zerado" se a quilometragem dele for alta, mesmo numa correção ou pedido de desculpas.
+- Se o cliente negar ou contestar algo que a análise automática apontou, NÃO insista nem repita a afirmação — peça desculpas, trate como possível erro da análise (reflexo, sombra, ângulo da foto) e assegure que o consultor vai avaliar pessoalmente. Nunca responda com a foto/análise de outro veículo por engano.
+
 ${veiculosAmbiguos && veiculosAmbiguos.length > 1 ? `🚨 AMBIGUIDADE DETECTADA — MAIS DE UM VEÍCULO NO ESTOQUE BATE COM O QUE O CLIENTE MENCIONOU:
 ${veiculosAmbiguos.map(v => `- ${limparTexto(v.modelo || "")} ${v.ano || ""} - R$ ${Number(v.preco || 0).toLocaleString("pt-BR")}`).join("\n")}
 NÃO escolha um desses sozinha nem responda com um preço genérico. Liste rapidamente as opções disponíveis (ano/versão) e pergunte qual delas o cliente quer, ANTES de informar qualquer preço.` : ""}
 
-${carroNaoDisponivel ? `⚠️ CARRO NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
-1. Informe que não está disponível no momento
+${carroNaoDisponivel ? `⚠️ CARRO/CARACTERÍSTICA NÃO DISPONÍVEL: Cliente procura ${carroNaoDisponivel}.
+1. Informe que não está disponível no estoque atual.
 2. Pergunte: ano procurado, faixa de preço/parcela, tem troca?
-3. Diga: "Posso te avisar quando chegar um ${carroNaoDisponivel} aqui! 😊"
-4. Só ofereça alternativas se tiver algo REALMENTE similar` : ""}
+3. 🚨 NUNCA prometa "vou te avisar quando chegar", "vou verificar disponibilidade futura" ou qualquer promessa parecida — não existe nenhuma fonte real de dados sobre reposição de estoque ou pedidos futuros confirmados, então essa promessa seria inventada. Em vez disso, diga que não há previsão de chegada confirmada no momento, e que pode anotar o interesse do cliente para o consultor avisar SE algo compatível aparecer (sem garantir prazo nenhum).
+4. Só ofereça alternativas se tiver algo REALMENTE similar no estoque atual.` : ""}
 
 ${descontoPendenteAtivo ? `🚨 DESCONTO PENDENTE — REGRA CRÍTICA E ABSOLUTA:
 Há um pedido de desconto aguardando retorno do nosso consultor. Ele AINDA NÃO RESPONDEU.
@@ -2398,12 +2540,49 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
   notificarAugusto(from, text, primeiraVez).catch(() => {});
   if (conversas[from].length > 20) conversas[from] = conversas[from].slice(-20);
 
+  // Intervenção manual recente: se um consultor humano respondeu esse cliente há pouco
+  // (via /painel/enviar, /painel/template ou /painel/intervencao), a Sara fica em modo
+  // silencioso — só registra a mensagem e notifica, sem gerar resposta automática, pra não
+  // atropelar ou contradizer o que o consultor já disse.
+  try {
+    const { data: clienteIntervencao } = await supabase.from("clientes").select("intervencao_manual_em").eq("telefone", from).limit(1);
+    const intervencaoEm = clienteIntervencao?.[0]?.intervencao_manual_em;
+    if (intervencaoEm && (Date.now() - new Date(intervencaoEm).getTime()) < JANELA_INTERVENCAO_MANUAL_MS) {
+      console.log(`[Intervenção Manual] Resposta automática pausada para ${from} (consultor interveio recentemente)`);
+      return;
+    }
+  } catch (e) { console.error("[Intervenção Manual] Erro ao checar flag:", e.message); }
+
+  if (clienteIndicouNumeroErrado(text)) {
+    atualizarEstagio(from, "frio").catch(() => {});
+    supabase.from("followups").update({ enviado: true }).eq("telefone", from).eq("enviado", false).then(() => {}, () => {});
+    conversas[from].push({ role: "user", content: "[Sistema: o cliente deu sinais de que esse pode ser número errado/engano. Peça desculpas de forma breve e educada, confirme se é isso mesmo, e NÃO continue com abordagem comercial (não ofereça carros, não insista em vender) nesta resposta.]" });
+  } else if (clienteSolicitouOptOutReativacao(text)) {
+    registrarOptOutReativacao(from).catch(() => {});
+    conversas[from].push({ role: "user", content: "[Sistema: o cliente pediu pra não receber mais mensagens automáticas de reativação/cobrança. Confirme educadamente que isso será respeitado e que ele pode voltar a falar com a gente quando quiser — não insista em oferecer carros nesta resposta.]" });
+  }
+
   detectarLeadFrio(from, text, conversas[from]).catch(() => {});
   detectarEstagio(from, text, conversas[from], ehRetry).catch(() => {});
 
   await carregarColetaCreditoPendente(from);
   if (coletaCredito[from]) {
     const estado = coletaCredito[from];
+
+    // Bug: cliente recusava explicitamente passar CPF/dados e a Sara insistia pedindo de
+    // novo, em loop. Agora, uma recusa explícita encerra a coleta automática.
+    if (clienteRecusouDadosFinanceiros(text)) {
+      delete coletaCredito[from];
+      await limparColetaCreditoPendente(from);
+      const msgRecusa = "Sem problemas, entendo! 😊 Nesse caso não consigo fazer a simulação automática sem os dados, mas posso pedir pro nosso consultor te chamar pra conversar sobre outras formas de negociar. Quer que eu peça?";
+      conversas[from].push({ role: "assistant", content: msgRecusa });
+      await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+        { messaging_product: "whatsapp", to: from, text: { body: msgRecusa } },
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+      );
+      await salvarMensagem(from, "sara", msgRecusa);
+      return;
+    }
 
     const cpfNaMensagem = validarCPF(text);
     const dataNaMensagem = extrairDataNascimento(text);
@@ -2820,6 +2999,8 @@ async function processarMensagem(from, text, tentativasAnteriores = 0) {
       if (respostaBloqueada) reply = respostaBloqueada;
     }
     reply = await bloquearSeParcelaSemSimulacaoReal(from, reply);
+    reply = bloquearPromessaEstoqueFuturo(reply);
+    reply = bloquearAdjetivoZeradoComKmAlto(reply, todosTextos.join(" "));
     conversas[from].push({ role: "assistant", content: reply });
 
     const respMeta = await axios.post(`https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
@@ -2869,9 +3050,14 @@ function agendarFechamentoGrupoFotos(from, caption) {
   }, 3000);
 }
 async function processarFotosAgrupadas(from, analises) {
+  // Bug (06/11): a Sara repassava a "análise" automática de visão computacional como fato
+  // garantido (ex: afirmou "amassamento" que o cliente negou). A análise de foto é SEMPRE
+  // uma observação preliminar, nunca um laudo — por isso ela entra na conversa já marcada
+  // como tal, com instrução explícita de nunca ser repetida ao cliente como certeza.
+  const disclaimer = "[Sistema: a 'análise' abaixo é uma observação PRELIMINAR e AUTOMÁTICA de visão computacional sobre a foto — NÃO é um laudo confirmado nem um fato certo. NUNCA repita isso ao cliente como certeza (ex: não diga 'notei um amassado' de forma afirmativa). Se for mencionar algo da análise, deixe claro que é uma impressão inicial sujeita a confirmação do consultor presencialmente, usando linguagem como 'pode ser' ou 'pareceu'. Se o cliente negar/contestar, NÃO insista — peça desculpas, trate como possível erro da análise automática (reflexo, sombra, ângulo) e diga que o consultor vai confirmar pessoalmente. NUNCA use adjetivos absolutos como 'zerado', 'impecável' ou 'perfeito' com base só em foto.]";
   const texto = analises.length === 1
-    ? `[Cliente enviou foto. Análise: ${analises[0]}]`
-    : `[Cliente enviou ${analises.length} fotos. Análises:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
+    ? `${disclaimer}\n[Cliente enviou foto. Observação preliminar automática: ${analises[0]}]`
+    : `${disclaimer}\n[Cliente enviou ${analises.length} fotos. Observações preliminares automáticas:\n${analises.map((a, i) => `Foto ${i+1}: ${a}`).join("\n")}]`;
   await processarMensagemNaFila(from, texto);
 }
 
@@ -3844,6 +4030,7 @@ app.post("/painel/enviar", async (req, res) => {
       if (!conversas[tel]) conversas[tel] = [];
       conversas[tel].push({ role: "assistant", content: texto });
       await salvarMensagem(tel, "intervencao", texto, wamid);
+      await marcarIntervencaoManual(tel);
     } catch(e) {
       console.error("[Painel] ❌ Erro enviar:", e.message);
       if (e.response) console.error("[Painel] Detalhe Meta:", JSON.stringify(e.response.data));
@@ -3925,6 +4112,7 @@ app.post("/painel/intervencao", async (req, res) => {
     if (!conversas[from]) conversas[from] = [];
     conversas[from].push({ role: "assistant", content: texto });
     await salvarMensagem(from, "intervencao", texto);
+    await marcarIntervencaoManual(from);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ erro: e.message }); }
 });
